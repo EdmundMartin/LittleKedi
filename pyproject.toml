@@ -1,0 +1,18 @@
+[project]
+name = "littlekedi"
+version = "0.2.0"
+description = "Small DeepSeek-style MoE language models (MLA + DeepSeekMoE) built for batched, compilable expert dispatch"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "torch>=2.8",  # torch._grouped_mm; on Windows+AMD install the ROCm build first (see README)
+    "numpy",
+    "tokenizers>=0.23.2",
+    "pyarrow",
+    "huggingface-hub>=1.33.0",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
