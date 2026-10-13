@@ -179,6 +179,11 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="default: <ckpt>-<dtype>.gguf")
     ap.add_argument("--dtype", choices=["f32", "f16", "q8_0"], default="f16")
     ap.add_argument("--name", default=None, help="model name stored in the file")
+    # Recommended sampling, stored as llama.cpp's general.sampling.* defaults (command-line flags still override).
+    # Small models loop without a repetition penalty; these match the model card and Ollama params.
+    ap.add_argument("--repeat-penalty", type=float, default=1.15)
+    ap.add_argument("--temp", type=float, default=0.7)
+    ap.add_argument("--top-p", type=float, default=0.9)
     args = ap.parse_args()
 
     ckpt = torch.load(args.ckpt, map_location="cpu")
@@ -195,6 +200,9 @@ def main() -> None:
     w.add_file_type({"f32": gguf.LlamaFileType.ALL_F32, "f16": gguf.LlamaFileType.MOSTLY_F16,
                      "q8_0": gguf.LlamaFileType.MOSTLY_Q8_0}[args.dtype])
     add_hparams(w, cfg)
+    w.add_sampling_penalty_repeat(args.repeat_penalty)
+    w.add_sampling_temp(args.temp)
+    w.add_sampling_top_p(args.top_p)
     add_tokenizer(w, tok, cfg.vocab_size, chat)
     for tname, t in tensor_map(ckpt["model"], cfg).items():
         data, qtype = to_numpy(tname, t, args.dtype)

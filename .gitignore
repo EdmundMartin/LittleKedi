@@ -9,3 +9,4 @@ release/
 .idea/
 *.gguf
 benchmark_report.html
+.env

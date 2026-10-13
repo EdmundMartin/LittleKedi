@@ -116,7 +116,7 @@ class Scorer:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", nargs="+", default=["checkpoints/tiny.pt"])
+    ap.add_argument("--ckpt", nargs="+", default=["checkpoints/mini.pt"])
     ap.add_argument("--verbose", action="store_true", help="print every probe and pair")
     ap.add_argument("--log", default=None, help="append results as JSON lines to this file")
     ap.add_argument("--device", default="auto")

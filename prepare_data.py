@@ -8,9 +8,11 @@ Steps:
   3. Train a byte-level BPE (digits split, chat tokens included) on a sample drawn from the
      mix in proportion to its weights.
   4. Hold out validation documents per source *before* any training documents are drawn, so no
-     validation document is ever trained on: val_<source>.bin per source, and val.bin with all of
-     them (in mix proportions). Then tokenize train.bin, interleaving sources so each keeps its
-     share of tokens throughout.
+     validation document is ever trained on. Exact duplicates of validation documents that turn up
+     later in a source are skipped too. val.bin is the mix in its mix proportions (--val-tokens in
+     total); val_<source>.bin is each source on its own, with at least --min-source-val-tokens, so small
+     sources still get a usable per-source loss. Then tokenize train.bin, interleaving sources so each
+     keeps its share of tokens throughout.
 
 Output: <out-dir>/{train.bin, val.bin, val_<source>.bin..., tokenizer.json, meta.json}, consumed by
     python train.py --data-dir <out-dir> --preset <preset>
@@ -25,6 +27,7 @@ Conversations (smoltalk) are rendered with the chat special tokens, which every 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import time
@@ -37,6 +40,7 @@ from huggingface_hub import HfApi, hf_hub_download
 
 from littlekedi import ModelConfig
 from littlekedi.chat import render_chat_text
+from littlekedi.runtime import keep_awake
 from littlekedi.tokenizer import USER, BPETokenizer, default_vocab
 
 # Permissive licences only, for the code source.
@@ -93,6 +97,11 @@ def iter_source(name: str, skip: int = 0) -> Iterator[str]:
                     yield text
 
 
+def doc_hash(text: str) -> str:
+    """Identity for exact-duplicate checks (whitespace at the ends ignored)."""
+    return hashlib.blake2b(text.strip().encode("utf-8"), digest_size=16).hexdigest()
+
+
 def parse_mix(items: list[str]) -> dict[str, float]:
     mix = {}
     for item in items:
@@ -113,7 +122,10 @@ def main() -> None:
     ap.add_argument("--vocab-size", type=int, default=None, help="default: per preset")
     ap.add_argument("--tokens-per-param", type=float, default=20.0, help="Chinchilla ratio")
     ap.add_argument("--target-tokens", type=float, default=None, help="override the Chinchilla target")
-    ap.add_argument("--val-tokens", type=float, default=4e6, help="held-out tokens in total, split by mix weight")
+    ap.add_argument("--val-tokens", type=float, default=4e6,
+                    help="tokens in val.bin (the whole mix), split by mix weight")
+    ap.add_argument("--min-source-val-tokens", type=float, default=5e5,
+                    help="minimum size of each per-source val_<source>.bin, so small sources still get a stable loss")
     ap.add_argument("--tokenizer-sample-mb", type=float, default=200.0)
     ap.add_argument("--out-dir", default=None, help="default: data/mix-<preset>")
     ap.add_argument("--tokenizer-path", default=None, help="reuse this tokenizer.json instead of training one")
@@ -124,6 +136,7 @@ def main() -> None:
                          "it used, and write its train.bin + the new tokens to --out-dir. "
                          "--target-tokens is then the combined total")
     args = ap.parse_args()
+    keep_awake("LittleKedi dataset prep")
 
     if args.list_sources:
         for name, (repo, prefix, _, _) in SOURCES.items():
@@ -149,9 +162,14 @@ def main() -> None:
         raise SystemExit(f"--target-tokens must exceed the {base_train:,} tokens already in {args.extend}")
     out = Path(args.out_dir or f"data/mix-{args.preset}")
     out.mkdir(parents=True, exist_ok=True)
+    # val.bin takes each source's mix share; each val_<source>.bin holds at least the minimum. val.bin is a
+    # prefix of each source's held-out tokens, so every validation token is held out from training either way.
     val_quota = {name: int(args.val_tokens * w) for name, w in mix.items()}
+    source_quota = {name: max(q, int(args.min_source_val_tokens)) if args.val_tokens else 0
+                    for name, q in val_quota.items()}
     print(f"{args.preset}: {total_params / 1e6:.2f}M params (vocab {vocab}) -> target {target / 1e6:,.0f}M train "
-          f"tokens + {args.val_tokens / 1e6:.0f}M val | mix " + ", ".join(f"{k} {v:.0%}" for k, v in mix.items()))
+          f"tokens | val.bin {args.val_tokens / 1e6:.1f}M, held out in total {sum(source_quota.values()) / 1e6:.1f}M "
+          f"| mix " + ", ".join(f"{k} {v:.0%}" for k, v in mix.items()))
 
     if skips:
         print("skipping already-used documents: " + ", ".join(f"{k} {v:,}" for k, v in skips.items()))
@@ -160,9 +178,9 @@ def main() -> None:
 
     # 1) Validation documents first, per source, so the tokenizer sample and train.bin never see them.
     val_docs: dict[str, list[str]] = {name: [] for name in mix}
-    # Rough sizing (~4 bytes/token) before the tokenizer exists; trimmed to the exact quota below.
+    # Rough sizing (~5 bytes/token, generous) before the tokenizer exists; trimmed to the exact quota below.
     for name in mix:
-        need_bytes = val_quota[name] * 4 * 1.25
+        need_bytes = source_quota[name] * 5
         got = 0
         while got < need_bytes:
             text = next(streams[name], None)
@@ -198,32 +216,57 @@ def main() -> None:
     assert tok.vocab_size <= 65536, "uint16 storage needs vocab <= 65536"
     eot = tok.eot_id
 
-    # 3) Write the validation sets.
-    val_written = {}
+    # 3) Write the validation sets, and remember every held-out document so duplicates never reach train.bin.
+    val_written, val_mix_written = {}, {}
+    val_hashes: set[str] = set()
     if args.extend:
         for f in Path(args.extend).glob("val*.bin"):
             shutil.copyfile(f, out / f.name)
         val_written = base_meta.get("val_tokens_per_source", {})
+        val_mix_written = base_meta.get("val_mix_tokens", {})
+        hashes_file = Path(args.extend) / "val_doc_hashes.txt"
+        if hashes_file.exists():
+            val_hashes = set(hashes_file.read_text(encoding="utf-8").split())
+            shutil.copyfile(hashes_file, out / hashes_file.name)
     else:
         with open(out / "val.bin", "wb") as all_val:
             for name in mix:
-                ids = [t for seq in tok.encode_batch(val_docs[name]) for t in (*seq, eot)][: val_quota[name]]
-                if len(ids) < val_quota[name]:
-                    print(f"  WARNING: {name} validation set is short ({len(ids):,} of {val_quota[name]:,} tokens)")
-                arr = np.asarray(ids, dtype=np.uint16).tobytes()
-                (out / f"val_{name}.bin").write_bytes(arr)
-                all_val.write(arr)
-                val_written[name] = len(ids)
+                used, ids = 0, []
+                for text, seq in zip(val_docs[name], tok.encode_batch(val_docs[name])):
+                    if len(ids) >= source_quota[name]:
+                        break  # documents past the quota are dropped, not trained on
+                    ids += [*seq, eot]
+                    val_hashes.add(doc_hash(text))
+                    used += 1
+                ids = ids[: source_quota[name]]
+                if len(ids) < source_quota[name]:
+                    print(f"  WARNING: {name} validation set is short ({len(ids):,} of {source_quota[name]:,} tokens)")
+                (out / f"val_{name}.bin").write_bytes(np.asarray(ids, dtype=np.uint16).tobytes())
+                mix_part = ids[: val_quota[name]]
+                all_val.write(np.asarray(mix_part, dtype=np.uint16).tobytes())
+                val_written[name], val_mix_written[name] = len(ids), len(mix_part)
+                print(f"  val {name}: {used:,} documents, {len(ids):,} tokens ({len(mix_part):,} in val.bin)", flush=True)
+        (out / "val_doc_hashes.txt").write_text("\n".join(sorted(val_hashes)), encoding="utf-8")
     del val_docs
+    skipped_dupes = {name: 0 for name in mix}
 
     def next_batch(name: str, n: int = 64) -> list[str]:
-        batch = buffered[name][:n]
-        buffered[name] = buffered[name][n:]
+        """Up to n training documents, skipping exact duplicates of any validation document."""
+        batch = []
+        while buffered[name] and len(batch) < n:
+            text = buffered[name].pop()
+            if doc_hash(text) in val_hashes:
+                skipped_dupes[name] += 1
+            else:
+                batch.append(text)
         for text in streams[name]:
+            docs_used[name] += 1
+            if doc_hash(text) in val_hashes:
+                skipped_dupes[name] += 1
+                continue
+            batch.append(text)
             if len(batch) >= n:
                 break
-            batch.append(text)
-            docs_used[name] += 1
         return batch
 
     # 4) Train: always draw from the source furthest below its share of tokens written so far.
@@ -261,7 +304,8 @@ def main() -> None:
         "preset": args.preset, "vocab_size": tok.vocab_size, "params_total": total_params,
         "tokens_per_param": (base_train + written) / total_params,
         "train_tokens": base_train + written,
-        "val_tokens": sum(val_written.values()), "val_tokens_per_source": val_written,
+        "val_tokens": sum(val_mix_written.values()), "val_mix_tokens": val_mix_written,
+        "val_tokens_per_source": val_written, "val_duplicates_skipped_from_train": skipped_dupes,
         "train_documents": base_meta.get("train_documents", 0) + n_docs,
         # Documents consumed per source (validation, tokenizer sample and train); --extend skips these.
         "source_documents": {**base_meta.get("source_documents", {}), **docs_used},

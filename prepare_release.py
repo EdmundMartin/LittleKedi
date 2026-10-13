@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -52,8 +53,42 @@ OLLAMA_PARAMS = {"stop": ["<|end|>", "<|user|>", "<|endoftext|>"], "temperature"
                  "repeat_penalty": 1.15}
 
 
+def build_gguf_repo(out: Path, name: str, md_args: dict, main_repo: str, gguf_repo: str,
+                    gguf_files: list[str]) -> Path:
+    """release/<name>-GGUF: GGUF files only, so the Hub shows its GGUF panel and llama.cpp / Ollama / LM Studio
+    buttons (a repo that also holds safetensors is shown as a safetensors repo instead)."""
+    gg = out.parent / f"{name}-GGUF"
+    gg.mkdir(parents=True, exist_ok=True)
+    extras = [("template", "Ollama chat template"), ("params", "Ollama stop tokens and sampling defaults"),
+              ("chat_template.jinja", "Chat template (Jinja), the same one embedded in the GGUF files"),
+              (LOGO, f"The {FAMILY} logo")]
+    files = [(g, f"GGUF ({g.rsplit('-', 1)[1][:-5]}) for llama.cpp / Ollama / LM Studio") for g in gguf_files]
+    for f, desc in extras:
+        if (out / f).exists():
+            files.append((f, desc))
+    for f, _ in files:
+        shutil.copyfile(out / f, gg / f)
+    md = build_card(**md_args, files=files, repo=gguf_repo)
+    _, front, body = md.split("---\n", 2)
+    front = "".join(l + "\n" for l in front.splitlines()
+                    if not l.startswith(("base_model:", "base_model_relation:", "library_name:")))
+    front += (f"library_name: gguf\nbase_model: {main_repo}\nbase_model_relation: quantized\n"
+              f"quantized_by: {gguf_repo.split('/')[0]}\n")
+    front = front.replace("tags:\n", "tags:\n- gguf\n", 1)
+    body = body.replace(f"# {name}\n", f"# {name}-GGUF\n\nGGUF builds (f16 and q8_0) of "
+                        f"[{name}](https://huggingface.co/{main_repo}) for llama.cpp, Ollama and LM Studio. The PyTorch "
+                        "weights (`model.safetensors`), config and tokenizer are in the main repo; the card below "
+                        "describes the model.\n", 1)
+    (gg / "README.md").write_text(f"---\n{front}---\n{body}", encoding="utf-8")
+    return gg
+
+
 def run_log_path(ckpt: str) -> Path:
-    return Path(ckpt).with_suffix(".log.jsonl")
+    """<ckpt>.log.jsonl; milestone checkpoints (<run>-750M.pt) share their run's log (<run>.log.jsonl)."""
+    path = Path(ckpt).with_suffix(".log.jsonl")
+    if not path.exists() and (m := re.fullmatch(r"(.+)-\d+M", Path(ckpt).stem)):
+        path = Path(ckpt).with_name(f"{m.group(1)}.log.jsonl")
+    return path
 
 
 def checkpoint_column(ckpt: str, label: str | None = None) -> tuple | None:
@@ -95,6 +130,11 @@ def main() -> None:
     ap.add_argument("--out-dir", default=None, help="default: release/<name>")
     ap.add_argument("--repo", default=None, help="target HF repo id (shown in the card's usage)")
     ap.add_argument("--base-repo", default=None, help="instruct cards: HF repo of the base model, linked from the card")
+    ap.add_argument("--gguf-repo", default=None,
+                    help="instruct releases: also build release/<name>-GGUF (GGUF files only) for this repo id, "
+                         "linked to --repo as a quantization so the Hub shows the GGUF panel")
+    ap.add_argument("--sft-data", default=None,
+                    help="instruct cards: a markdown description of the SFT data (default: the file names)")
     ap.add_argument("--base-ckpt", default=None, help="instruct cards: base checkpoint (default: the one sft.py recorded)")
     ap.add_argument("--gguf", nargs="*", default=["f16", "q8_0"], choices=["f32", "f16", "q8_0"],
                     help="GGUF builds for instruct releases (base releases never include GGUF)")
@@ -111,11 +151,17 @@ def main() -> None:
         raise SystemExit(f"{args.ckpt}: config doesn't match any preset; this card is for the preset family")
     step, tokens = ck.get("step"), ck.get("tokens")
     # Pretraining details live with the base model's run, which an instruct checkpoint points back to.
-    log = read_run_log(run_log_path(base_ckpt if chat and base_ckpt else args.ckpt))
+    log = read_run_log(run_log_path(base_ckpt if chat and base_ckpt else args.ckpt),
+                       up_to_step=None if chat else step)
     start_args = (log["start"] or {}).get("args", {})
     if tokens is None and start_args:  # older checkpoints: tokens from the step and the logged batch shape
         tokens = (step + 1) * start_args["batch_size"] * start_args["seq_len"] * start_args.get("grad_accum", 1)
     tokens = tokens or 0
+    planned_steps = ((log["latest_start"] or {}).get("args") or {}).get("steps")
+    in_progress = None
+    if not chat and planned_steps and isinstance(step, int) and step + 1 < planned_steps:
+        per_step = tokens / (step + 1)
+        in_progress = {"tokens": tokens, "planned": planned_steps * per_step}
     data_dir = start_args.get("data_dir")
     meta_path = Path(data_dir) / "meta.json" if data_dir else None
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path and meta_path.exists() else {}
@@ -148,6 +194,8 @@ def main() -> None:
     ckpt_dir = Path(args.ckpt).parent
     others = [str(ckpt_dir / f"{size}{v}.pt") for v in VARIANTS]
     skip = {Path(args.ckpt).resolve()} | ({Path(base_ckpt).resolve()} if base_ckpt else set())
+    if m := re.fullmatch(r"(.+)-\d+M", Path(args.ckpt).stem):  # a milestone: its own run isn't a sibling
+        skip.add(Path(args.ckpt).with_name(f"{m.group(1)}.pt").resolve())
     others = [p for p in dict.fromkeys(others + args.compare) if Path(p).resolve() not in skip]
     columns = [checkpoint_column(args.ckpt, "**This model**")]
     columns += [c for c in (checkpoint_column(p) for p in others) if c]
@@ -168,9 +216,10 @@ def main() -> None:
         val_bpt=val_bytes_per_token(data_dir, tok), evals=mine["evals"], mmlu=mine["mmlu"],
         columns=columns, files=files, hardware=args.hardware,
         capabilities=Path(args.capabilities).read_text(encoding="utf-8").strip() if args.capabilities else None,
-        code_url=args.code_url, ckpt=args.ckpt, logo=logo, chat=chat, sft=ck.get("sft"),
+        code_url=args.code_url, ckpt=args.ckpt, logo=logo, chat=chat,
+        sft={**(ck.get("sft") or {}), **({"data_note": args.sft_data} if args.sft_data else {})},
         base_results=base_results, inst_results=mine if chat else None, base_repo=args.base_repo,
-        gguf=gguf_files, repo=args.repo)
+        gguf=gguf_files, repo=args.repo, in_progress=in_progress)
 
     if args.card_only:
         path = Path(args.ckpt).with_name(f"{Path(args.ckpt).stem}-card.md")
@@ -205,8 +254,23 @@ def main() -> None:
         for p in sorted(out.iterdir()):
             print(f"  {p.name:28s} {p.stat().st_size / 1e6:8.2f} MB")
         print(f"\nto publish (after `hf auth login`):\n  hf upload {args.repo or '<user>/' + name} {out} . --repo-type model")
+        if chat and args.gguf_repo:
+            gg = build_gguf_repo(out, name, md_args=dict(
+                preset=preset, cfg=cfg, counts=counts, step=step, tokens=tokens, log=log, meta=meta,
+                tok_info=tok_info, val_bpt=val_bytes_per_token(data_dir, tok), evals=mine["evals"],
+                mmlu=mine["mmlu"], columns=columns, hardware=args.hardware,
+                capabilities=Path(args.capabilities).read_text(encoding="utf-8").strip() if args.capabilities else None,
+                code_url=args.code_url, ckpt=args.ckpt, logo=logo, chat=chat,
+                sft={**(ck.get("sft") or {}), **({"data_note": args.sft_data} if args.sft_data else {})},
+                base_results=base_results, inst_results=mine, base_repo=args.base_repo, gguf=gguf_files,
+                in_progress=in_progress), main_repo=args.repo, gguf_repo=args.gguf_repo, gguf_files=gguf_files)
+            print(f"\nGGUF repo folder: {gg}")
+            for p in sorted(gg.iterdir()):
+                print(f"  {p.name:40s} {p.stat().st_size / 1e6:8.2f} MB")
+            print(f"  hf upload {args.gguf_repo} {gg} . --repo-type model")
     found = [k for k, v in mine.items() if v]
-    print(f"card for {name} ({'instruct' if chat else 'base'}) at step {step}: evaluations found: {', '.join(found) or 'none'}"
+    progress = f" (IN PROGRESS: {in_progress['tokens'] / in_progress['planned']:.0%} of planned tokens)" if in_progress else ""
+    print(f"card for {name} ({'instruct' if chat else 'base'}) at step {step}{progress}: evaluations found: {', '.join(found) or 'none'}"
           + ("" if args.capabilities else "  (capabilities section is a TODO; pass --capabilities FILE)"))
 
 

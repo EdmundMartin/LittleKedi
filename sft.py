@@ -104,6 +104,9 @@ def main() -> None:
     ap.add_argument("--weight-decay", type=float, default=0.0)
     ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--val-frac", type=float, default=0.05)
+    ap.add_argument("--val-data", nargs="*", default=[],
+                    help="fixed validation JSONL file(s); when given, all --data/--hf is used for training and "
+                         "every run is scored on the same conversations (needed to compare runs)")
     ap.add_argument("--eval-every", type=int, default=200)
     ap.add_argument("--log-every", type=int, default=20)
     ap.add_argument("--moe-backend", choices=["auto", "capacity", "grouped_mm", "sorted"], default="auto",
@@ -143,8 +146,12 @@ def main() -> None:
     convs = load_conversations(args.data, args.hf)
     examples = [e for c in convs if (e := encode_conversation(tok, c, model.cfg.max_seq_len + 1))]
     random.Random(args.seed).shuffle(examples)
-    n_val = max(1, int(len(examples) * args.val_frac))
-    val, train = examples[:n_val], examples[n_val:]
+    if args.val_data:
+        val = [e for c in load_conversations(args.val_data, []) if (e := encode_conversation(tok, c, model.cfg.max_seq_len + 1))]
+        train = examples
+    else:
+        n_val = max(1, int(len(examples) * args.val_frac))
+        val, train = examples[:n_val], examples[n_val:]
     trained_tokens = sum(sum(l != IGNORE for l in y) for _, y in train)
     print(f"{len(convs):,} conversations -> {len(examples):,} usable ({len(train):,} train / {len(val):,} val), "
           f"{trained_tokens / 1e6:.2f}M assistant tokens in train")

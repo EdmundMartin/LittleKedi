@@ -69,5 +69,41 @@ def setup_backends(device: str) -> None:
         torch.backends.cudnn.allow_tf32 = True
 
 
+_power_request = None  # kept alive for the life of the process; Windows releases it on exit
+
+
+def keep_awake(reason: str, display: bool = True) -> bool:
+    """Ask Windows not to sleep while this process runs (no-op elsewhere). Returns True if granted.
+
+    Uses a power request, the mechanism media players and installers use, rather than changing any power
+    setting: it lasts only as long as the process. It asks for the system to stay awake, for execution to
+    continue through Modern Standby, and (by default) for the display to stay on, since on Modern Standby
+    laptops the screen turning off is what triggers standby. Closing the lid or choosing Sleep still sleeps.
+    """
+    global _power_request
+    if platform.system() != "Windows":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    class ReasonContext(ctypes.Structure):
+        _fields_ = [("Version", wintypes.ULONG), ("Flags", wintypes.DWORD), ("SimpleReasonString", wintypes.LPWSTR)]
+
+    k32 = ctypes.windll.kernel32
+    k32.PowerCreateRequest.restype = wintypes.HANDLE
+    k32.PowerCreateRequest.argtypes = [ctypes.POINTER(ReasonContext)]
+    k32.PowerSetRequest.restype = wintypes.BOOL
+    k32.PowerSetRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+    ctx = ReasonContext(0, 0x1, reason)  # POWER_REQUEST_CONTEXT_VERSION, _SIMPLE_STRING
+    handle = k32.PowerCreateRequest(ctypes.byref(ctx))
+    if not handle or handle == wintypes.HANDLE(-1).value:
+        return False
+    # PowerRequestDisplayRequired = 0, SystemRequired = 1, ExecutionRequired = 3
+    kinds = ([0] if display else []) + [1, 3]
+    ok = all(k32.PowerSetRequest(handle, k) for k in kinds)
+    _power_request = (handle, ctx)
+    return ok
+
+
 def grouped_mm_available() -> bool:
     return hasattr(torch, "_grouped_mm")

@@ -34,6 +34,9 @@ def test_export_gguf_roundtrip(tmp_path):
     assert f("deepseek2.attention.q_lora_rank") == 0  # required by llama.cpp for non-"lite" layer counts
     assert f("deepseek2.attention.key_length_mla") == cfg.qk_head_dim
     assert len(f("tokenizer.ggml.tokens")) == tok.vocab_size
+    # Recommended sampling defaults travel with the file.
+    assert abs(f("general.sampling.penalty_repeat") - 1.15) < 1e-6
+    assert abs(f("general.sampling.temp") - 0.7) < 1e-6 and abs(f("general.sampling.top_p") - 0.9) < 1e-6
 
     t = {x.name: np.asarray(x.data) for x in g.tensors}
     assert "blk.1.ffn_gate_exps.weight" in t and "blk.0.ffn_gate.weight" in t  # layer 0 dense, rest MoE

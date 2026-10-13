@@ -47,8 +47,7 @@ presets."""
 FAMILY_FOOTNOTE = """"Active" counts everything a token passes through: embeddings, attention, the dense layer, shared
 experts and its top-k routed experts. "Active non-embedding" leaves out the embedding table (tied with the
 output head), which costs memory but almost no compute; it's the fair number for comparing compute
-between models. Tokens per expert is per MoE layer for a 1B-token run with balanced routing; below
-~25–50M, experts are probably undertrained."""
+between models."""
 
 DISCLAIMER_BASE = ("This is the **base model**, before any instruction tuning. It continues text; it doesn't follow "
                    "instructions. It's an educational and research artifact: it writes fluent, on-topic English but "
@@ -140,10 +139,15 @@ def merged_results(path: str, ckpt: str, step) -> dict:
     return out
 
 
-def read_run_log(path: str | Path) -> dict:
-    """train.py's JSONL log, merged across resumes: first start's args, train/eval records by step."""
+def read_run_log(path: str | Path, up_to_step: int | None = None) -> dict:
+    """train.py's JSONL log, merged across resumes: first start's args, train/eval records by step.
+
+    up_to_step drops records after a checkpoint's step (a milestone checkpoint shares the run's log).
+    """
     starts, train, evals = [], {}, {}
     for r in read_jsonl(path):
+        if r["event"] != "start" and up_to_step is not None and r.get("step", 0) > up_to_step:
+            continue
         if r["event"] == "start":
             starts.append(r)
         elif r["event"] == "train":
@@ -193,14 +197,13 @@ def family_table(current: str) -> str:
             cells = [f"`{name}`", VARIANT_NAMES[v], f"{cfg.vocab_size // 1024}K",
                      f"{e['total'] / 1e6:.1f}M", f"{e['activated'] / 1e6:.1f}M",
                      f"{e['activated_non_embedding'] / 1e6:.1f}M", f"{e['fraction_activated']:.0%}",
-                     f"{cfg.n_routed_experts} × {cfg.moe_hidden_dim}, top-{cfg.n_activated_experts}",
-                     f"{cfg.tokens_per_expert(1e9) / 1e6:.0f}M"]
+                     f"{cfg.n_routed_experts} × {cfg.moe_hidden_dim}, top-{cfg.n_activated_experts}"]
             if name == current:
                 cells = [f"**{c}**" for c in cells]
                 cells[0] = f"**`{name}` ← this model**"
             rows.append("| " + " | ".join(cells) + " |")
-    return ("| Model | Variant | Vocab | Total | Active | Active non-emb. | Active % | Routed experts | Tokens/expert (1B) |\n"
-            "|---|---|---|---|---|---|---|---|---|\n" + "\n".join(rows))
+    return ("| Model | Variant | Vocab | Total | Active | Active non-emb. | Active % | Routed experts |\n"
+            "|---|---|---|---|---|---|---|---|\n" + "\n".join(rows))
 
 
 def siblings_line(preset: str) -> str:
@@ -426,7 +429,9 @@ def sft_section(sft: dict, base_link: str) -> str:
     if "conversations" in sft:
         rows.append(f"| Conversations | {sft['conversations']:,} ({sft['train']:,} train / {sft['val']:,} validation), "
                     f"{fmt_tokens(sft['assistant_tokens'])} assistant tokens trained on |")
-    if sft.get("data"):
+    if sft.get("data_note"):
+        rows.append(f"| Data | {sft['data_note']} |")
+    elif sft.get("data"):
         rows.append("| Data | " + ", ".join(f"`{Path(d).name}`" if ":" not in d[2:] else f"`{d.split(':')[0]}`"
                                             for d in sft["data"]) + " |")
     rows.append("| Loss | On assistant replies and their closing `<|end|>` only; prompts and padding are masked |")
@@ -470,12 +475,21 @@ def base_vs_instruct(base: dict, inst: dict) -> str:
             "| Metric | Base | **Instruct** |\n|---|---|---|\n" + "\n".join(rows))
 
 
+def in_progress_note(p: dict | None) -> str:
+    """A short notice for a checkpoint from a run that hasn't finished."""
+    if not p:
+        return ""
+    return (f"\n> **Training in progress.** This is a checkpoint at **{p['tokens'] / 1e9:.2f}B of {p['planned'] / 1e9:.1f}B "
+            f"tokens** ({p['tokens'] / p['planned']:.0%}). The weights and results below will be replaced as training "
+            "continues, and the final model will be better than this checkpoint.\n")
+
+
 def build_card(*, preset: str, cfg: ModelConfig, counts: dict, step, tokens: int, log: dict, meta: dict,
                tok_info: dict, val_bpt: float | None, evals: dict, mmlu: dict, columns: list[tuple],
                files: list[tuple[str, str]], hardware: str, capabilities: str | None, code_url: str | None,
                ckpt: str, logo: str | None = LOGO, chat: bool = False, sft: dict | None = None,
                base_results: dict | None = None, inst_results: dict | None = None, base_repo: str | None = None,
-               gguf: list[str] | None = None, repo: str | None = None) -> str:
+               gguf: list[str] | None = None, repo: str | None = None, in_progress: dict | None = None) -> str:
     name = model_name(preset, chat)
     base_name = model_name(preset)
     base_link = f"[{base_name}](https://huggingface.co/{base_repo})" if base_repo else f"`{base_name}`"
@@ -526,7 +540,7 @@ datasets:
 ---
 
 {logo_html(logo)}# {name}
-
+{in_progress_note(in_progress)}
 `{name}` is {intro}a **small DeepSeek-V3-style Mixture-of-Experts language model trained from scratch**. It has
 **{counts['total'] / 1e6:.1f}M parameters** in total, of which **{counts['activated'] / 1e6:.1f}M are active per token**
 ({counts['activated_non_embedding'] / 1e6:.2f}M excluding the embedding table). It was pretrained on {data_desc}.
@@ -554,7 +568,7 @@ datasets:
 
 ## What it can and can't do
 
-{capabilities or "*TODO: describe what this model can and can't do (pass `--capabilities FILE`).*"}
+{capabilities or ("*To be written when training completes.*" if in_progress else "*TODO: describe what this model can and can't do (pass `--capabilities FILE`).*")}
 
 {usage(name, code_url, chat, gguf or [], repo)}
 

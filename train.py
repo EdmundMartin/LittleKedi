@@ -36,7 +36,7 @@ import torch
 
 from littlekedi import LittleKediModel, ModelConfig
 from littlekedi.optim import build_optimizer, lr_at
-from littlekedi.runtime import autocast, pick_device, resolve_precision, setup_backends
+from littlekedi.runtime import autocast, keep_awake, pick_device, resolve_precision, setup_backends
 from littlekedi.tokenizer import BPETokenizer, default_vocab, encode_files
 
 SHAKESPEARE_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -147,6 +147,11 @@ def load_val_sets(d: Path) -> dict[str, np.ndarray]:
     return sets
 
 
+def usable_val(data: np.ndarray, seq_len: int) -> bool:
+    """A validation set needs at least one full window (the evaluator spaces windows across the file)."""
+    return len(data) >= seq_len + 2
+
+
 def save_checkpoint(path: str | Path, model, opt, cfg, tokenizer, step: int, tokens: int, preset: str) -> None:
     """Write atomically so a crash mid-save never corrupts the previous checkpoint."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -203,6 +208,8 @@ def main() -> None:
     ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--eval-every", type=int, default=250)
     ap.add_argument("--eval-iters", type=int, default=20)
+    ap.add_argument("--source-eval-every", type=int, default=1000,
+                    help="steps between per-source validation evals (val_<source>.bin); val.bin uses --eval-every")
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument("--save-every", type=int, default=100)
     ap.add_argument("--milestone-every", type=float, default=250e6, help="keep a checkpoint every N tokens; 0 = off")
@@ -213,11 +220,16 @@ def main() -> None:
                     help="auto = bf16 autocast on CUDA/ROCm, fp32 elsewhere")
     ap.add_argument("--compile", action="store_true", help="torch.compile the training forward")
     ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--keep-awake", action=argparse.BooleanOptionalAction, default=True,
+                    help="Windows: hold a power request so the PC doesn't sleep or enter Modern Standby mid-run "
+                         "(keeps the display on; lasts only while training runs)")
     args = ap.parse_args()
 
     args.device = pick_device(args.device)
     args.precision = resolve_precision(args.precision, args.device)
     setup_backends(args.device)
+    if args.keep_awake and keep_awake(f"LittleKedi training {args.preset}"):
+        print("holding a Windows power request: no sleep or standby until training ends (display stays on)")
     torch.manual_seed(args.seed)
     if args.data_dir:
         d = Path(args.data_dir)
@@ -325,7 +337,12 @@ def main() -> None:
             log.write(event="train", step=step, tokens=tokens, loss=loss, lr=lr, tok_s=tok_s, **m)
         if (step > 0 and step % args.eval_every == 0) or step == args.steps - 1:
             record = {}
+            final = step == args.steps - 1
             for name, data in val_sets.items():
+                if name != "val" and not (final or step % args.source_eval_every == 0):
+                    continue  # per-source sets less often: one full eval per set costs as much as val.bin's
+                if not usable_val(data, args.seq_len):
+                    continue
                 val_loss, val_load = evaluate(model, data, args)
                 record[f"{name}_loss"] = val_loss
                 if name == "val":

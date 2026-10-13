@@ -35,6 +35,7 @@ from pathlib import Path
 import numpy as np
 from openai import OpenAI
 
+from littlekedi.runtime import keep_awake
 from littlekedi.tokenizer import BPETokenizer
 
 SYSTEM_PROMPT = "You create high-quality training data for a small language model. You reply with JSON only."
@@ -42,8 +43,22 @@ SYSTEM_PROMPT = "You create high-quality training data for a small language mode
 USER_PROMPT = """Below is a document. Write {n} question-answer pairs grounded in it.
 
 Rules:
-- Each question must make sense on its own, to someone who has never seen the document. Never refer to "the document", "the text", "the passage", or "the author".
-- Each answer must be fully supported by the document and must also stand alone: no references to the document.
+- The person asking and answering has NEVER seen the document. Each question must make sense entirely on its
+  own, as if asked out of the blue in a general conversation.
+- Name every subject explicitly. Never point back at the document with words like "this", "these", "that",
+  "the above" or "the following" (e.g. "this project", "this study", "these results", "the farm", "the
+  exhibit"), and never use "mentioned", "described", "discussed", "according to", "the document", "the text",
+  "the passage", "the article" or "the author".
+    Bad:  "What is the primary purpose of this exhibit?"
+    Good: "What is the purpose of the Requiem of Water art exhibit?"
+    Bad:  "Why did the farm change its chicken feed?"
+    Good: "Why did Beneficial Farm stop using meat and bone meal in its chicken feed?"
+- If a question can't be made self-contained (the subject has no name, or only makes sense with the
+  document in hand), skip it.
+- Prefer questions about general, lasting knowledge the document teaches (facts, explanations, definitions)
+  over details that only matter to the document's own story.
+- Each answer must be fully supported by the document and must also stand alone, with the same rules: no
+  references to the document, no "this"/"these" pointing at it.
 - Vary the questions: facts, explanations ("why"/"how"), definitions, comparisons.
 - Answers: clear, plain prose, 1-4 sentences, at most {max_words} words.
 - If the document has no substantive content worth asking about (e.g. navigation text, ads, lists of links), return an empty list.
@@ -56,7 +71,15 @@ Document:
 {document}
 \"\"\""""
 
-_BANNED = re.compile(r"\b(the|this) (document|text|passage|article)\b|\bthe author\b", re.IGNORECASE)
+# Pairs that still lean on the document after the prompt's rules; the student never sees the document.
+_BANNED = re.compile(
+    r"\b(the|this|that) (document|text|passage|article|excerpt)\b"
+    r"|\b(this|that|these|those)(\s+[\w-]+){0,2}\s+(story|post|page|essay|report|study|studies|exhibit|project|projects|"
+    r"series|program|programme|course|book|chapter|section|paper|results|findings|research|initiative|event|"
+    r"campaign|collection|artwork|piece|author|authors|writer|website|site)\b"
+    r"|\bthe author\b|\baccording to\b|\b(mentioned|described|discussed|outlined|stated) (above|here|earlier)\b"
+    r"|\b(above|following) (text|passage|document)\b",
+    re.IGNORECASE)
 
 
 def split_documents(data: np.ndarray, eot_id: int) -> list[tuple[int, int]]:
@@ -107,25 +130,29 @@ def sample_source_docs(name: str, tok: BPETokenizer, data_dir: Path, k: int, min
 def parse_pairs(content: str) -> list[dict]:
     """Extract Q&A pairs from a model reply, tolerating code fences and reasoning tags."""
     content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-    content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
-    try:
-        obj = json.loads(content)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", content, re.DOTALL)
-        if not m:
-            return []
+    # Some models write their reasoning (and echo the example template) before the real JSON, so take the
+    # last decodable {"pairs": ...} object in the reply rather than the first.
+    obj, decoder = None, json.JSONDecoder()
+    for m in re.finditer(r"\{", content):
         try:
-            obj = json.loads(m.group(0))
+            cand, _ = decoder.raw_decode(content, m.start())
         except json.JSONDecodeError:
-            return []
-    pairs = obj.get("pairs", []) if isinstance(obj, dict) else []
+            continue
+        if isinstance(cand, dict) and isinstance(cand.get("pairs"), list):
+            obj = cand
+    if obj is None:
+        return []
     out = []
-    for p in pairs:
+    for p in obj["pairs"]:
         if not isinstance(p, dict):
             continue
         q, a = str(p.get("question", "")).strip(), str(p.get("answer", "")).strip()
-        # Drop pairs that leak the document framing; the student never sees the document.
-        if q and a and not _BANNED.search(q) and not _BANNED.search(a):
+        # Drop placeholders echoed from the template, and pairs that leak the document framing.
+        if len(q) < 10 or len(a) < 10 or q.strip(". ") == "" or a.strip(". ") == "":
+            continue
+        if "�" in q or "�" in a:  # garbled text (a multi-byte character cut in the source)
+            continue
+        if not _BANNED.search(q) and not _BANNED.search(a):
             out.append({"question": q, "answer": a})
     return out
 
@@ -155,6 +182,7 @@ def main() -> None:
                     help="disable reasoning via chat_template_kwargs.enable_thinking=false (Qwen3-style models)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    keep_awake("LittleKedi SFT data generation", display=True)
 
     d = Path(args.data_dir)
     out_path = Path(args.out or d / (f"sft_qa_{args.source}.jsonl" if args.source else "sft_qa.jsonl"))

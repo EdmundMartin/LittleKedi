@@ -134,6 +134,34 @@ python prepare_release.py --ckpt checkpoints/tiny-sft.pt --repo <user>/LittleKed
   text the same way as our digit-splitting tokenizer. v1's exporter was checked against llama.cpp b11203; this one hasn't
   been run through llama.cpp yet.
 
+## Training on RunPod
+
+`cloud.py` launches training runs on RunPod from this repo:
+- **code:** each pod clones GitHub at your current commit, so commit and push first;
+- **data:** a private Hugging Face dataset;
+- **outputs:** checkpoints and logs sync to a private Hugging Face repo (`edededdy/littlekedi-runs`) every 30 minutes;
+- **clean-up:** the pod deletes itself when training ends.
+
+If a pod dies or hits `--max-hours`, launch the same run again and it resumes from the last sync.
+
+Credentials go in `.env` (gitignored; copy `.env.example`) or environment variables, never on the command line:
+- `RUNPOD_API_KEY`: your RunPod API key.
+- `LK_HF_TOKEN`: a fine-grained Hugging Face token that can read the dataset repo and write to the runs repo. It's stored
+  in the pod's environment on RunPod, so don't use your main token.
+
+```sh
+python cloud.py push-data data/mix-8k-4b --repo edededdy/littlekedi-data-mix-8k-4b     # once per dataset
+python cloud.py launch mini-wide-sparse --data-repo edededdy/littlekedi-data-mix-8k-4b --data-name mix-8k-4b     --train-args "--preset mini-wide-sparse --max-train-tokens 3.2e9 --batch-size 16 --grad-accum 4 --compile"
+python cloud.py list                       # your pods, status and $/hr
+python cloud.py logs mini-wide-sparse      # tail of the synced training log
+python cloud.py pull mini-wide-sparse      # checkpoints, milestones and logs -> checkpoints/
+python cloud.py terminate <pod-id>
+```
+
+`--dry-run` prints the pod request without launching. Other options: `--gpu` (RunPod GPU type ids, in priority order;
+default RTX 4090), `--cloud SECURE`, `--spot` (interruptible: cheaper, and it resumes from the last sync if killed),
+`--max-hours`, `--keep-pod`.
+
 ## v1 checkpoints
 
 ```sh
