@@ -38,6 +38,7 @@ REPO_URL = "https://github.com/EdmundMartin/LittleKedi.git"
 RAW_URL = "https://raw.githubusercontent.com/EdmundMartin/LittleKedi"
 DEFAULT_IMAGE = "pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel"
 DEFAULT_RUNS_REPO = "edededdy/littlekedi-runs"
+CUDA_VERSIONS = ["13.0", "12.9", "12.8", "12.7", "12.6", "12.5", "12.4", "12.3", "12.2", "12.1", "12.0", "11.8"]  # API enum
 LAUNCHES = Path("checkpoints/cloud_launches.jsonl")  # local record of what was launched (checkpoints/ is gitignored)
 
 
@@ -114,6 +115,8 @@ def cmd_launch(a) -> None:
              f"curl -fsSL {RAW_URL}/{ref}/cloud/bootstrap.sh -o /tmp/bootstrap.sh && bash /tmp/bootstrap.sh")
     body = {"name": f"littlekedi-{a.run}", "imageName": a.image, "cloudType": a.cloud, "gpuTypeIds": a.gpu,
             "gpuCount": 1, "containerDiskInGb": a.disk, "volumeInGb": 0, "interruptible": a.spot,
+            # hosts whose driver can run the image's CUDA; any older one fails at the first CUDA call
+            "allowedCudaVersions": [v for v in CUDA_VERSIONS if float(v) >= float(a.min_cuda)],
             "dockerEntrypoint": ["bash", "-lc"], "dockerStartCmd": [start], "env": env}
     shown = {**body, "env": {**env, "HF_TOKEN": "<LK_HF_TOKEN>"}}
     if a.dry_run:
@@ -154,8 +157,11 @@ def _download(run: str, runs_repo: str, patterns: list[str]) -> Path:
 
 
 def cmd_logs(a) -> None:
-    d = _download(a.run, a.runs_repo, [f"{a.run}.out"])
-    lines = (d / f"{a.run}.out").read_text(encoding="utf-8", errors="replace").splitlines()
+    f = _download(a.run, a.runs_repo, [f"{a.run}.out"]) / f"{a.run}.out"
+    if not f.exists():
+        raise SystemExit(f"no log synced for {a.run} yet (start-up takes a few minutes, then it syncs every "
+                         f"--sync-minutes); start-up errors are only in the pod's own log in the RunPod console")
+    lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
     print("\n".join(lines[-a.lines:]))
 
 
@@ -188,6 +194,8 @@ def main() -> None:
     p.add_argument("--cloud", choices=["COMMUNITY", "SECURE"], default="COMMUNITY")
     p.add_argument("--spot", action="store_true", help="interruptible (cheaper; resumes from the last sync if killed)")
     p.add_argument("--image", default=DEFAULT_IMAGE)
+    p.add_argument("--min-cuda", default="12.8", choices=CUDA_VERSIONS,
+                   help="only hosts whose driver supports at least this CUDA (match the image's)")
     p.add_argument("--disk", type=int, default=60, help="container disk in GB (dataset + checkpoints)")
     p.add_argument("--runs-repo", default=DEFAULT_RUNS_REPO)
     p.add_argument("--sync-minutes", type=int, default=30)
