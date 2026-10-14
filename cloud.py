@@ -61,7 +61,9 @@ def runpod(method: str, path: str, body: dict | None = None) -> dict | list:
         raise SystemExit("set RUNPOD_API_KEY (RunPod -> Settings -> API Keys)")
     req = urllib.request.Request(f"{API}{path}", method=method,
                                  data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                                          # Cloudflare in front of the API blocks urllib's default UA (error 1010)
+                                          "User-Agent": "littlekedi-cloud/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             raw = r.read()
