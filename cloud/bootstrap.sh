@@ -12,13 +12,27 @@ exec > >(tee -a /workspace/bootstrap.log) 2>&1
 log() { echo "[littlekedi $(date -u +%H:%M:%S)] $*"; }
 log "pod ${RUNPOD_POD_ID:-?} starting run ${LK_RUN} at ${LK_REF}"
 
+DONE=/workspace/.littlekedi-done  # container disk survives restarts: marks a run that already finished
+
 terminate() {
   [ "${LK_AUTOTERMINATE:-1}" = "1" ] || { log "auto-terminate off; pod left running"; return; }
-  log "terminating pod ${RUNPOD_POD_ID:-?}"
-  curl -fsS -X DELETE "https://rest.runpod.io/v1/pods/${RUNPOD_POD_ID}" -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
-    || curl -fsS -X POST "https://rest.runpod.io/v1/pods/${RUNPOD_POD_ID}/stop" -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
-    || log "could not terminate or stop the pod itself: stop it with cloud.py terminate"
+  log "terminating pod ${RUNPOD_POD_ID:-?} (pod API key $([ -n "${RUNPOD_API_KEY:-}" ] && echo present || echo MISSING))"
+  # The pod-scoped key works with the GraphQL API (what runpodctl uses); the REST call is a fallback.
+  curl -fsS -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY:-}" -H "Content-Type: application/json" \
+      -d "{\"query\": \"mutation { podTerminate(input: {podId: \\\"${RUNPOD_POD_ID:-}\\\"}) }\"}" | tee /dev/stderr \
+      | grep -q '"errors"' && log "GraphQL terminate returned errors" || { sleep 60; log "terminate requested"; }
+  curl -fsS -X DELETE "https://rest.runpod.io/v1/pods/${RUNPOD_POD_ID:-}" -H "Authorization: Bearer ${RUNPOD_API_KEY:-}" \
+    || log "REST terminate failed too: stop it with cloud.py terminate"
 }
+
+# The container is restarted whenever this script exits. If the run already finished here, don't redo
+# set-up or sync: try to terminate again, then idle rather than loop (cloud.py watch can terminate it).
+if [ -f "$DONE" ]; then
+  log "run ${LK_RUN} already finished on this pod"
+  terminate
+  log "still running after terminate attempts; idling (terminate with cloud.py)"
+  exec sleep infinity
+fi
 
 command -v git >/dev/null && command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq git curl >/dev/null; }
 [ -d LittleKedi/.git ] || git clone -q "$LK_REPO" LittleKedi
@@ -75,4 +89,6 @@ STATUS=${PIPESTATUS[0]}
 log "training exited with status ${STATUS}; final sync"
 kill "$SYNC_PID" 2>/dev/null
 sync
+[ "$STATUS" = "0" ] && touch "$DONE"
 terminate
+[ -f "$DONE" ] && { log "idling after a finished run (terminate with cloud.py)"; exec sleep infinity; }

@@ -20,6 +20,7 @@ Credentials, in .env (gitignored; see .env.example) or as environment variables,
     python cloud.py logs mini-wide-sparse            # tail of the synced training log
     python cloud.py pull mini-wide-sparse            # checkpoints + logs -> checkpoints/
     python cloud.py terminate <pod-id>
+    python cloud.py watch mini-wide-sparse <pod-id>  # terminates the pod after the run ends, if it didn't itself
 """
 
 from __future__ import annotations
@@ -150,6 +151,36 @@ def cmd_terminate(a) -> None:
     print(f"terminated {a.pod} (synced checkpoints stay in the runs repo)")
 
 
+def _run_finished(run: str, runs_repo: str) -> bool:
+    """True once the synced training log has its final 'end' record (the final checkpoint is in the same sync)."""
+    from huggingface_hub import hf_hub_download
+    try:
+        p = hf_hub_download(runs_repo, f"{run}/{run}.log.jsonl", local_dir="checkpoints/.synced", force_download=True)
+    except Exception:  # nothing synced yet
+        return False
+    return any(json.loads(line).get("event") == "end"
+               for line in Path(p).read_text(encoding="utf-8-sig").splitlines() if line.strip())
+
+
+def cmd_watch(a) -> None:
+    """Safety net for self-termination: terminate the pod once its run has finished and synced."""
+    import time
+    ended = None
+    print(f"watching pod {a.pod} (run {a.run}); checking every {a.every} min, grace {a.grace} min after the end")
+    while True:
+        if not any(p["id"] == a.pod for p in runpod("GET", "/pods")):
+            print(f"pod {a.pod} is gone" + (" (deleted itself)" if ended else ""))
+            return
+        if ended is None and _run_finished(a.run, a.runs_repo):
+            ended = time.time()
+            print(f"{time.strftime('%H:%M')} run finished and synced; giving the pod {a.grace} min to delete itself")
+        if ended is not None and time.time() - ended >= a.grace * 60:
+            print(f"{time.strftime('%H:%M')} pod still up: terminating")
+            cmd_terminate(a)
+            return
+        time.sleep(a.every * 60)
+
+
 def _download(run: str, runs_repo: str, patterns: list[str]) -> Path:
     from huggingface_hub import snapshot_download
     return Path(snapshot_download(runs_repo, allow_patterns=[f"{run}/{p}" for p in patterns],
@@ -207,6 +238,11 @@ def main() -> None:
 
     sub.add_parser("list", help="list your pods").set_defaults(fn=cmd_list)
     p = sub.add_parser("terminate", help="terminate a pod"); p.add_argument("pod"); p.set_defaults(fn=cmd_terminate)
+    p = sub.add_parser("watch", help="terminate a pod once its run has finished and synced (self-delete safety net)")
+    p.add_argument("run"); p.add_argument("pod"); p.add_argument("--runs-repo", default=DEFAULT_RUNS_REPO)
+    p.add_argument("--every", type=float, default=5, help="minutes between checks")
+    p.add_argument("--grace", type=float, default=10, help="minutes to let the pod delete itself first")
+    p.set_defaults(fn=cmd_watch)
     for name, fn, help_ in (("logs", cmd_logs, "tail a run's synced training log"),
                             ("pull", cmd_pull, "copy a run's synced checkpoints and logs into checkpoints/")):
         p = sub.add_parser(name, help=help_)
