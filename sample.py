@@ -98,7 +98,7 @@ class Tester:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", default="checkpoints/tiny.pt")
+    ap.add_argument("--ckpt", default="checkpoints/mini-wide-sparse-1250M.pt")
     ap.add_argument("--prompt", default=None, help="one-shot mode: complete this and exit")
     ap.add_argument("--tokens", type=int, default=200)
     ap.add_argument("--temperature", type=float, default=0.8)
