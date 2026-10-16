@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -60,6 +61,69 @@ def _text(b) -> Iterator[str]:
     return iter(b.column("text").to_pylist())
 
 
+# Wikipedia (wikimedia/wikipedia) has its markup stripped, but keeps empty trailing sections and the category
+# list, empty brackets where pronunciations were, and double spaces where unit templates were dropped.
+WIKI_TRAILING_SECTIONS = {
+    "see also", "notes", "footnotes", "references", "external links", "further reading", "bibliography",
+    "sources", "citations", "notes and references", "references and notes", "explanatory notes", "works cited",
+    "gallery", "sister projects",
+}
+WIKI_MIN_CHARS = 500  # after cleaning: drops stubs
+WIKI_SHORT_LINE = 60  # tables and long lists flatten into runs of short lines without sentence punctuation
+WIKI_MAX_SHORT_RUN = 3  # a heading or two is fine; a longer run of short lines is a table or list: dropped
+_EMPTY_BRACKETS = re.compile(r"[ \t]*\((?:[\s,;:.]|​)*\)")
+_SPACES = re.compile(r"[ \t]+")
+_BLANK_LINES = re.compile(r"\n{3,}")
+
+
+def _drop_short_runs(lines: list[str]) -> list[str]:
+    """Remove runs of more than WIKI_MAX_SHORT_RUN short lines (blank lines inside a run don't end it).
+
+    A dropped run that prose follows keeps its last line: that's the next section's heading.
+    """
+    out, run = [], []
+
+    def flush(before_prose: bool):
+        filled = [l for l in run if l]
+        if len(filled) <= WIKI_MAX_SHORT_RUN:
+            out.extend(run)
+        elif before_prose:
+            out.extend(["", filled[-1], ""])
+        run.clear()
+
+    for line in lines:
+        sentence = line.endswith((".", "!", "?", ":")) and len(line.split()) >= 4  # not "?" or "Details:"
+        if not line or (len(line) < WIKI_SHORT_LINE and not sentence):
+            run.append(line)
+        else:
+            flush(before_prose=True)
+            out.append(line)
+    flush(before_prose=False)
+    return out
+
+
+def clean_wikipedia(title: str, text: str) -> str | None:
+    """A Wikipedia article as clean prose, or None if it isn't worth training on (lists, disambiguation, stubs)."""
+    if title.startswith(("List of", "Lists of")) or "(disambiguation)" in title:
+        return None
+    if "may refer to" in text[:500] or "may also refer to" in text[:500]:
+        return None
+    lines = []
+    for line in text.split("\n"):
+        if line.strip().lower() in WIKI_TRAILING_SECTIONS:
+            break  # everything after the first trailing section is references, links and categories
+        lines.append(_SPACES.sub(" ", _EMPTY_BRACKETS.sub("", line)).strip())
+    text = _BLANK_LINES.sub("\n\n", "\n".join(_drop_short_runs(lines))).strip()
+    return text if len(text) >= WIKI_MIN_CHARS else None
+
+
+def _wikipedia_rows(batch) -> Iterator[str]:
+    cols = batch.to_pydict()
+    for title, text in zip(cols["title"], cols["text"]):
+        if (clean := clean_wikipedia(title, text)) is not None:
+            yield clean
+
+
 # name -> (repo, shard path prefix, columns to read, row batch -> text documents)
 SOURCES: dict[str, tuple[str, str, list[str], Callable]] = {
     "fineweb-edu": ("HuggingFaceFW/fineweb-edu", "sample/10BT/", ["text"], _text),
@@ -71,6 +135,7 @@ SOURCES: dict[str, tuple[str, str, list[str], Callable]] = {
     # the alphabetically-first auto_math_text shards).
     **{f"cosmo-{sub}": ("HuggingFaceTB/cosmopedia", f"data/{sub}/", ["text"], _text)
        for sub in ("stanford", "openstax", "wikihow", "khanacademy")},
+    "wikipedia": ("wikimedia/wikipedia", "20231101.en/", ["title", "text"], _wikipedia_rows),
     "smoltalk": ("HuggingFaceTB/smoltalk", "data/all/train-", ["messages"],
                  lambda b: (render_chat_text(m) for m in b.column("messages").to_pylist())),
 }
