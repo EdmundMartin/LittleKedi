@@ -41,12 +41,16 @@ pip install -q --root-user-action=ignore numpy pyarrow "tokenizers>=0.23.2" "hug
 python -c "import torch; print('torch', torch.__version__, '| gpu', torch.cuda.get_device_name(0))" || { terminate; exit 1; }
 
 export LK_DATA_DIR="data/${LK_DATA_NAME}"
+if [ -n "${LK_DATA_REPO:-}" ]; then
 python - <<'EOF' || { log "data download failed"; terminate; exit 1; }
 import os
 from huggingface_hub import snapshot_download
 snapshot_download(os.environ["LK_DATA_REPO"], repo_type="dataset", local_dir=os.environ["LK_DATA_DIR"])
 print("dataset ready:", os.environ["LK_DATA_DIR"], sorted(os.listdir(os.environ["LK_DATA_DIR"])))
 EOF
+else
+  log "no dataset repo: skipping the dataset download"
+fi
 
 # Resume from anything already synced for this run (a previous pod that died or hit its time limit).
 mkdir -p checkpoints
@@ -79,11 +83,16 @@ EOF
 ( while sleep $(( ${LK_SYNC_MINUTES:-30} * 60 )); do sync; done ) &
 SYNC_PID=$!
 
-log "train.py --data-dir ${LK_DATA_DIR} ${LK_TRAIN_ARGS} --out checkpoints/${LK_RUN}.pt ${RESUME}"
-# shellcheck disable=SC2086
-timeout --signal=INT "$(( ${LK_MAX_HOURS:-48} * 3600 ))" \
-  python -u -W ignore train.py --data-dir "${LK_DATA_DIR}" ${LK_TRAIN_ARGS} --out "checkpoints/${LK_RUN}.pt" ${RESUME} \
-  2>&1 | tee -a "checkpoints/${LK_RUN}.out"
+if [ -n "${LK_CMD:-}" ]; then  # a custom job (e.g. sft.py) instead of a training run
+  log "command: ${LK_CMD}"
+  timeout --signal=INT "$(( ${LK_MAX_HOURS:-48} * 3600 ))" bash -c "${LK_CMD}" 2>&1 | tee -a "checkpoints/${LK_RUN}.out"
+else
+  log "train.py --data-dir ${LK_DATA_DIR} ${LK_TRAIN_ARGS} --out checkpoints/${LK_RUN}.pt ${RESUME}"
+  # shellcheck disable=SC2086
+  timeout --signal=INT "$(( ${LK_MAX_HOURS:-48} * 3600 ))" \
+    python -u -W ignore train.py --data-dir "${LK_DATA_DIR}" ${LK_TRAIN_ARGS} --out "checkpoints/${LK_RUN}.pt" ${RESUME} \
+    2>&1 | tee -a "checkpoints/${LK_RUN}.out"
+fi
 STATUS=${PIPESTATUS[0]}
 [ "$STATUS" = "124" ] && log "hit the ${LK_MAX_HOURS}h limit; resume by launching the same run again"
 log "training exited with status ${STATUS}; final sync"

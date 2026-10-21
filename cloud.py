@@ -111,7 +111,9 @@ def cmd_launch(a) -> None:
     env = {"LK_REPO": REPO_URL, "LK_REF": ref, "LK_RUN": a.run, "LK_DATA_REPO": a.data_repo,
            "LK_DATA_NAME": a.data_name, "LK_RUNS_REPO": a.runs_repo, "LK_TRAIN_ARGS": a.train_args,
            "LK_SYNC_MINUTES": str(a.sync_minutes), "LK_MAX_HOURS": str(a.max_hours),
-           "LK_AUTOTERMINATE": "0" if a.keep_pod else "1"}
+           "LK_AUTOTERMINATE": "0" if a.keep_pod else "1", "LK_CMD": a.command or ""}
+    if not a.command and not (a.data_repo and a.data_name and a.train_args):
+        raise SystemExit("give --data-repo, --data-name and --train-args (a training run), or --command")
     start = (f"(command -v curl >/dev/null || (apt-get update -qq && apt-get install -y -qq curl)) && "
              f"curl -fsSL {RAW_URL}/{ref}/cloud/bootstrap.sh -o /tmp/bootstrap.sh && bash /tmp/bootstrap.sh")
     body = {"name": f"littlekedi-{a.run}", "imageName": a.image, "cloudType": a.cloud, "gpuTypeIds": a.gpu,
@@ -168,16 +170,19 @@ def cmd_watch(a) -> None:
     ended = None
     print(f"watching pod {a.pod} (run {a.run}); checking every {a.every} min, grace {a.grace} min after the end")
     while True:
-        if not any(p["id"] == a.pod for p in runpod("GET", "/pods")):
-            print(f"pod {a.pod} is gone" + (" (deleted itself)" if ended else ""))
-            return
-        if ended is None and _run_finished(a.run, a.runs_repo):
-            ended = time.time()
-            print(f"{time.strftime('%H:%M')} run finished and synced; giving the pod {a.grace} min to delete itself")
-        if ended is not None and time.time() - ended >= a.grace * 60:
-            print(f"{time.strftime('%H:%M')} pod still up: terminating")
-            cmd_terminate(a)
-            return
+        try:
+            if not any(p["id"] == a.pod for p in runpod("GET", "/pods")):
+                print(f"pod {a.pod} is gone" + (" (deleted itself)" if ended else ""))
+                return
+            if ended is None and _run_finished(a.run, a.runs_repo):
+                ended = time.time()
+                print(f"{time.strftime('%H:%M')} run finished and synced; giving the pod {a.grace} min to delete itself")
+            if ended is not None and time.time() - ended >= a.grace * 60:
+                print(f"{time.strftime('%H:%M')} pod still up: terminating")
+                cmd_terminate(a)
+                return
+        except Exception as e:  # a network blip (DNS, timeout, 5xx) mustn't end the safety net: try again next round
+            print(f"{time.strftime('%H:%M')} check failed, retrying in {a.every} min: {type(e).__name__}: {e}", flush=True)
         time.sleep(a.every * 60)
 
 
@@ -218,9 +223,13 @@ def main() -> None:
 
     p = sub.add_parser("launch", help="start a pod that trains one run")
     p.add_argument("run", help="run name: checkpoints/<run>.pt, and its folder in the runs repo")
-    p.add_argument("--data-repo", required=True, help="HF dataset repo holding the prepared dataset")
-    p.add_argument("--data-name", required=True, help="local dataset dir name on the pod (data/<name>)")
-    p.add_argument("--train-args", required=True, help="train.py arguments except --data-dir/--out/--resume")
+    p.add_argument("--data-repo", default="", help="HF dataset repo holding the prepared dataset")
+    p.add_argument("--data-name", default="", help="local dataset dir name on the pod (data/<name>)")
+    p.add_argument("--train-args", default="", help="train.py arguments except --data-dir/--out/--resume")
+    p.add_argument("--command", default=None,
+                   help="run this shell command (from the repo root) instead of train.py, e.g. an sft.py run. Files in "
+                        "the run's runs-repo folder are restored to checkpoints/ first; checkpoints/<run>.* and "
+                        "<run>-* are synced back. Without --data-repo, no dataset is downloaded")
     p.add_argument("--gpu", nargs="+", default=["NVIDIA GeForce RTX 4090"], help="RunPod GPU type ids, in priority order")
     p.add_argument("--cloud", choices=["COMMUNITY", "SECURE"], default="COMMUNITY")
     p.add_argument("--spot", action="store_true", help="interruptible (cheaper; resumes from the last sync if killed)")
