@@ -40,7 +40,7 @@ cd LittleKedi && git fetch -q origin && git checkout -q "$LK_REF" || { log "cann
 pip install -q --root-user-action=ignore numpy pyarrow "tokenizers>=0.23.2" "huggingface-hub>=1.33" safetensors gguf
 python -c "import torch; print('torch', torch.__version__, '| gpu', torch.cuda.get_device_name(0))" || { terminate; exit 1; }
 
-export LK_DATA_DIR="data/${LK_DATA_NAME}"
+export LK_DATA_DIR="data/${LK_DATA_NAME:-}"  # RunPod drops empty env vars, so default it under set -u
 if [ -n "${LK_DATA_REPO:-}" ]; then
 python - <<'EOF' || { log "data download failed"; terminate; exit 1; }
 import os
