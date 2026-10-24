@@ -1,10 +1,12 @@
-"""Zero-shot multiple-choice benchmarks for small models: SciQ, ARC-Easy and HellaSwag.
+"""Zero-shot multiple-choice benchmarks for small models: SciQ, ARC-Easy, ARC-Challenge, HellaSwag, PIQA and
+ArithMark-3 (all but SciQ make up the Open SLM Leaderboard's set: --slm-leaderboard).
 
 Prompts follow lm-evaluation-harness, so the numbers roughly line up with published
 small-model results (Pythia, SmolLM, ...). Each choice is scored by the log-probability
 of its continuation after the prompt:
   acc       highest summed log-probability
   acc_norm  highest log-probability per character of the continuation (length-normalised)
+  acc_norm_tok  highest log-probability per continuation token (what ArithMark-3's own script calls acc_norm)
 
     python evals.py --ckpt checkpoints/tiny.pt --log evals.jsonl
     python evals.py --tasks sciq arc_easy --limit 200 --device cpu      # quick run
@@ -43,14 +45,37 @@ def load_sciq() -> list[dict]:
     return out
 
 
-def load_arc_easy() -> list[dict]:
-    """ARC-Easy test (2,376). A few questions have 3 or 5 choices, and some use 1-4 instead of A-D."""
+def _arc(subset: str) -> list[dict]:
     out = []
-    for r in _rows("allenai/ai2_arc", "ARC-Easy/test-00000-of-00001.parquet"):
+    for r in _rows("allenai/ai2_arc", f"{subset}/test-00000-of-00001.parquet"):
         labels, texts = r["choices"]["label"], r["choices"]["text"]
         out.append({"prompt": f"Question: {r['question']}\nAnswer:", "choices": texts,
                     "answer": labels.index(r["answerKey"])})
     return out
+
+
+def load_arc_easy() -> list[dict]:
+    """ARC-Easy test (2,376). A few questions have 3 or 5 choices, and some use 1-4 instead of A-D."""
+    return _arc("ARC-Easy")
+
+
+def load_arc_challenge() -> list[dict]:
+    """ARC-Challenge test (1,172), same format as ARC-Easy."""
+    return _arc("ARC-Challenge")
+
+
+def load_piqa() -> list[dict]:
+    """PIQA validation (1,838; test labels aren't public), the copy lm-evaluation-harness uses."""
+    return [{"prompt": f"Question: {r['goal']}\nAnswer:", "choices": [r["sol1"], r["sol2"]], "answer": int(r["label"])}
+            for r in _rows("baber/piqa", "piqa_validation.parquet")]
+
+
+def load_arithmark3() -> list[dict]:
+    """ArithMark-3.0 (1,000 arithmetic word problems as continuations), scored like its bencharithmark-3.py."""
+    path = hf_hub_download("AxiomicLabs/ArithMark-3.0", "arithmark-3.jsonl", repo_type="dataset")
+    with open(path, encoding="utf-8-sig") as fh:
+        rows = [json.loads(line) for line in fh if line.strip()]
+    return [{"prompt": r["ctx"], "choices": r["endings"], "answer": int(r["label"])} for r in rows]
 
 
 def _hellaswag_clean(text: str) -> str:
@@ -70,8 +95,11 @@ def load_hellaswag() -> list[dict]:
     return out
 
 
-TASKS = {"sciq": load_sciq, "arc_easy": load_arc_easy, "hellaswag": load_hellaswag}
-CHANCE = {"sciq": 0.25, "arc_easy": 0.25, "hellaswag": 0.25}
+TASKS = {"sciq": load_sciq, "arc_easy": load_arc_easy, "hellaswag": load_hellaswag,
+         "arc_challenge": load_arc_challenge, "piqa": load_piqa, "arithmark3": load_arithmark3}
+DEFAULT_TASKS = ["sciq", "arc_easy", "hellaswag"]
+SLM_LEADERBOARD = ["hellaswag", "arc_easy", "arc_challenge", "piqa", "arithmark3"]
+CHANCE = {"sciq": 0.25, "arc_easy": 0.25, "hellaswag": 0.25, "arc_challenge": 0.25, "piqa": 0.5, "arithmark3": 0.25}
 
 
 class Scorer:
@@ -134,7 +162,7 @@ class Scorer:
         return out
 
     def run(self, items: list[dict], chunk: int = 256) -> dict:
-        correct = correct_norm = 0
+        correct = correct_norm = correct_tok = 0
         t0 = time.time()
         for start in range(0, len(items), chunk):
             batch = items[start : start + chunk]
@@ -145,19 +173,22 @@ class Scorer:
                     owners.append(k)
             lps = self.logprobs(reqs)
             per_item: dict[int, list[float]] = {}
-            for k, lp in zip(owners, lps):
+            per_tok: dict[int, list[float]] = {}
+            for k, lp, (_, cont) in zip(owners, lps, reqs):
                 per_item.setdefault(k, []).append(lp)
+                per_tok.setdefault(k, []).append(lp / max(1, len(cont)))
             for k, item in enumerate(batch):
-                lp = per_item[k]
+                lp, tok = per_item[k], per_tok[k]
                 norm = [l / max(1, len(" " + str(c).strip())) for l, c in zip(lp, item["choices"])]
                 correct += max(range(len(lp)), key=lp.__getitem__) == item["answer"]
                 correct_norm += max(range(len(norm)), key=norm.__getitem__) == item["answer"]
+                correct_tok += max(range(len(tok)), key=tok.__getitem__) == item["answer"]
             done = start + len(batch)
             if done % 2048 < chunk or done == len(items):
                 print(f"    {done:,}/{len(items):,}  acc {correct / done:.1%}  acc_norm {correct_norm / done:.1%}  "
                       f"{time.time() - t0:.0f}s", flush=True)
         n = len(items)
-        return {"acc": correct / n, "acc_norm": correct_norm / n, "n": n,
+        return {"acc": correct / n, "acc_norm": correct_norm / n, "acc_norm_tok": correct_tok / n, "n": n,
                 "stderr": math.sqrt(max(correct_norm / n * (1 - correct_norm / n), 1e-9) / n)}
 
 
@@ -166,13 +197,17 @@ def main() -> None:
     ap.add_argument("--ckpt", default="checkpoints/tiny.pt")
     ap.add_argument("--hf", default=None, metavar="REPO",
                     help="evaluate a Hugging Face causal LM instead (logged as hf:<repo>), e.g. openai-community/gpt2")
-    ap.add_argument("--tasks", nargs="+", default=list(TASKS), choices=list(TASKS))
+    ap.add_argument("--tasks", nargs="+", default=DEFAULT_TASKS, choices=list(TASKS))
+    ap.add_argument("--slm-leaderboard", action="store_true",
+                    help=f"run the Open SLM Leaderboard's tasks instead: {' '.join(SLM_LEADERBOARD)}")
     ap.add_argument("--limit", type=int, default=None, help="quick run: first N items per task")
     ap.add_argument("--batch-size", type=int, default=32, help="sequences per forward pass")
     ap.add_argument("--log", default=None, help="append a JSON summary line here")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
+    if args.slm_leaderboard:
+        args.tasks = SLM_LEADERBOARD
     device = pick_device(args.device)
     sc = Scorer.from_hf(args.hf, device, args.batch_size) if args.hf else Scorer(args.ckpt, device, args.batch_size)
     print(f"{sc.label} (step {sc.step}{', SFT' if sc.chat else ''}): tasks {args.tasks}, context {sc.max_len}", flush=True)
@@ -182,7 +217,7 @@ def main() -> None:
         print(f"  {task}: {len(items):,} items", flush=True)
         summary[task] = r = sc.run(items)
         print(f"  {task}: acc {r['acc']:.2%}  acc_norm {r['acc_norm']:.2%} (±{r['stderr']:.1%})  "
-              f"chance {CHANCE[task]:.0%}\n", flush=True)
+              f"acc_norm_tok {r['acc_norm_tok']:.2%}  chance {CHANCE[task]:.0%}\n", flush=True)
     print("summary: " + "   ".join(f"{t} {summary[t]['acc_norm']:.1%}" for t in args.tasks) + "  (acc_norm)")
     if args.log:
         with open(args.log, "a", encoding="utf-8") as fh:
