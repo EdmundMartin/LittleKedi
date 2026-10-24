@@ -60,7 +60,7 @@ import os, shutil
 from huggingface_hub import snapshot_download
 run, repo = os.environ["LK_RUN"], os.environ["LK_RUNS_REPO"]
 try:
-    d = snapshot_download(repo, allow_patterns=[f"{run}/*"], local_dir="/workspace/synced")
+    d = snapshot_download(repo, allow_patterns=[f"{run}/*"], ignore_patterns=["*.tmp"], local_dir="/workspace/synced")
     src = os.path.join(d, run)
     if os.path.isdir(src):
         for f in os.listdir(src):
@@ -77,7 +77,7 @@ import os
 from huggingface_hub import HfApi
 run = os.environ["LK_RUN"]
 HfApi().upload_folder(repo_id=os.environ["LK_RUNS_REPO"], folder_path="checkpoints", path_in_repo=run,
-                      allow_patterns=[f"{run}.*", f"{run}-*"], commit_message=f"{run}: sync")
+                      allow_patterns=[f"{run}.*", f"{run}-*"], ignore_patterns=["*.tmp"], commit_message=f"{run}: sync")
 EOF
 }
 ( while sleep $(( ${LK_SYNC_MINUTES:-30} * 60 )); do sync; done ) &
