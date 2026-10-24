@@ -11,6 +11,7 @@ of its continuation after the prompt:
     python evals.py --ckpt checkpoints/tiny.pt --log evals.jsonl
     python evals.py --tasks sciq arc_easy --limit 200 --device cpu      # quick run
     python evals.py --hf EleutherAI/pythia-70m --log evals.jsonl          # a Hugging Face baseline, same prompts
+    python evals.py --repo edededdy/LittleKedi-moderate-wide-sparse-base --slm-leaderboard   # a published model
 """
 
 from __future__ import annotations
@@ -104,13 +105,29 @@ CHANCE = {"sciq": 0.25, "arc_easy": 0.25, "hellaswag": 0.25, "arc_challenge": 0.
 
 class Scorer:
     def __init__(self, ckpt: str, device: str, batch_size: int = 32):
-        self.device, self.batch_size = device, batch_size
         ck = torch.load(ckpt, map_location=device)
-        self.tok = load_tokenizer(ck["tokenizer"])
-        self.model = LittleKediModel(ModelConfig.from_dict(ck["config"])).to(device).eval()
-        self.model.load_state_dict(ck["model"])
-        self.max_len = self.model.cfg.max_seq_len
+        self._setup(ck["config"], ck["model"], ck["tokenizer"], device, batch_size)
         self.step, self.chat, self.label = ck.get("step"), bool(ck.get("chat")), ckpt
+
+    @classmethod
+    def from_repo(cls, repo: str, device: str, batch_size: int = 32) -> "Scorer":
+        """Score a published LittleKedi model (model.safetensors + config.json + tokenizer.json on the Hub)."""
+        from safetensors.torch import load_file
+        self = cls.__new__(cls)
+        with open(hf_hub_download(repo, "config.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        with open(hf_hub_download(repo, "tokenizer.json"), encoding="utf-8") as fh:
+            tok = fh.read()
+        self._setup(cfg, load_file(hf_hub_download(repo, "model.safetensors"), device=device), tok, device, batch_size)
+        self.step, self.chat, self.label = None, False, f"repo:{repo}"
+        return self
+
+    def _setup(self, cfg: dict, state: dict, tok_json: str, device: str, batch_size: int) -> None:
+        self.device, self.batch_size = device, batch_size
+        self.tok = load_tokenizer(tok_json)
+        self.model = LittleKediModel(ModelConfig.from_dict(cfg)).to(device).eval()
+        self.model.load_state_dict(state)
+        self.max_len = self.model.cfg.max_seq_len
         self.encode, self.bos, self.pad_id = self.tok.encode, [self.tok.eot_id], self.tok.eot_id
         self.forward = lambda x: self.model(x).logits
 
@@ -197,6 +214,9 @@ def main() -> None:
     ap.add_argument("--ckpt", default="checkpoints/tiny.pt")
     ap.add_argument("--hf", default=None, metavar="REPO",
                     help="evaluate a Hugging Face causal LM instead (logged as hf:<repo>), e.g. openai-community/gpt2")
+    ap.add_argument("--repo", default=None, metavar="REPO",
+                    help="evaluate a published LittleKedi model from the Hub (logged as repo:<repo>), "
+                         "e.g. edededdy/LittleKedi-moderate-wide-sparse-base")
     ap.add_argument("--tasks", nargs="+", default=DEFAULT_TASKS, choices=list(TASKS))
     ap.add_argument("--slm-leaderboard", action="store_true",
                     help=f"run the Open SLM Leaderboard's tasks instead: {' '.join(SLM_LEADERBOARD)}")
@@ -209,7 +229,12 @@ def main() -> None:
     if args.slm_leaderboard:
         args.tasks = SLM_LEADERBOARD
     device = pick_device(args.device)
-    sc = Scorer.from_hf(args.hf, device, args.batch_size) if args.hf else Scorer(args.ckpt, device, args.batch_size)
+    if args.hf:
+        sc = Scorer.from_hf(args.hf, device, args.batch_size)
+    elif args.repo:
+        sc = Scorer.from_repo(args.repo, device, args.batch_size)
+    else:
+        sc = Scorer(args.ckpt, device, args.batch_size)
     print(f"{sc.label} (step {sc.step}{', SFT' if sc.chat else ''}): tasks {args.tasks}, context {sc.max_len}", flush=True)
     summary = {"ckpt": sc.label, "step": sc.step, "chat": sc.chat, "time": time.strftime("%Y-%m-%d %H:%M")}
     for task in args.tasks:
