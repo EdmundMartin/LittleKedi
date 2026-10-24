@@ -15,6 +15,14 @@ log "pod ${RUNPOD_POD_ID:-?} starting run ${LK_RUN} at ${LK_REF}"
 DONE=/workspace/.littlekedi-done  # container disk survives restarts: marks a run that already finished
 
 terminate() {
+  # The pod's own log vanishes with it, so keep a copy in the runs repo (the only record of a failed start-up).
+  python - <<'EOF' || log "could not upload bootstrap.log"
+import os
+from huggingface_hub import HfApi
+run = os.environ["LK_RUN"]
+HfApi().upload_file(path_or_fileobj="/workspace/bootstrap.log", path_in_repo=f"{run}/bootstrap.log",
+                    repo_id=os.environ["LK_RUNS_REPO"], commit_message=f"{run}: bootstrap log ({os.environ.get('RUNPOD_POD_ID', '?')})")
+EOF
   [ "${LK_AUTOTERMINATE:-1}" = "1" ] || { log "auto-terminate off; pod left running"; return; }
   log "terminating pod ${RUNPOD_POD_ID:-?} (pod API key $([ -n "${RUNPOD_API_KEY:-}" ] && echo present || echo MISSING))"
   # The pod-scoped key works with the GraphQL API (what runpodctl uses); the REST call is a fallback.
@@ -38,7 +46,8 @@ command -v git >/dev/null && command -v curl >/dev/null || { apt-get update -qq 
 [ -d LittleKedi/.git ] || git clone -q "$LK_REPO" LittleKedi
 cd LittleKedi && git fetch -q origin && git checkout -q "$LK_REF" || { log "cannot check out $LK_REF"; terminate; exit 1; }
 pip install -q --root-user-action=ignore numpy pyarrow "tokenizers>=0.23.2" "huggingface-hub>=1.33" safetensors gguf
-python -c "import torch; print('torch', torch.__version__, '| gpu', torch.cuda.get_device_name(0))" || { terminate; exit 1; }
+nvidia-smi || log "nvidia-smi failed"
+python -c "import torch; print('torch', torch.__version__, '| gpu', torch.cuda.get_device_name(0))" || { log "CUDA check failed"; terminate; exit 1; }
 
 export LK_DATA_DIR="data/${LK_DATA_NAME:-}"  # RunPod drops empty env vars, so default it under set -u
 if [ -n "${LK_DATA_REPO:-}" ]; then
