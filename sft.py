@@ -31,7 +31,7 @@ import torch
 from littlekedi import LittleKediModel, ModelConfig
 from littlekedi.chat import END, IGNORE, add_chat_tokens, encode_conversation, render_prompt
 from littlekedi.optim import build_optimizer
-from littlekedi.runtime import autocast, grouped_mm_available, pick_device, resolve_precision, setup_backends
+from littlekedi.runtime import autocast, grouped_mm_available, keep_awake, pick_device, resolve_precision, setup_backends
 from littlekedi.tokenizer import load_tokenizer
 
 
@@ -111,6 +111,9 @@ def main() -> None:
     ap.add_argument("--log-every", type=int, default=20)
     ap.add_argument("--moe-backend", choices=["auto", "capacity", "grouped_mm", "sorted"], default="auto",
                     help="auto = grouped_mm (dropless) where torch has it, else the checkpoint's own")
+    ap.add_argument("--capacity-factor", type=float, default=None,
+                    help="capacity backend: slots per expert = cf * tokens * top_k / experts (default: the checkpoint's); "
+                         "n_experts / top_k or more never drops (small batches overflow at the pretraining value)")
     ap.add_argument("--device", default="auto", help="auto = cuda > apple-silicon mps > cpu")
     ap.add_argument("--precision", choices=["auto", "fp32", "bf16", "fp16"], default="auto",
                     help="auto = bf16 autocast on CUDA/ROCm, fp32 elsewhere")
@@ -119,6 +122,7 @@ def main() -> None:
                     help="keep running aux-loss-free bias updates during SFT (default: frozen at the pretrained "
                          "values, so a small fine-tune can't skew routing that was balanced over pretraining)")
     args = ap.parse_args()
+    keep_awake("LittleKedi SFT", display=False)  # a sleeping laptop pauses the run
     if not args.data and not args.hf:
         ap.error("give at least one --data or --hf source")
 
@@ -132,6 +136,8 @@ def main() -> None:
     model = LittleKediModel(cfg).to(args.device)
     model.load_state_dict(ckpt["model"])
     pretrain_backend = cfg.moe_backend
+    if args.capacity_factor is not None:
+        model.cfg.capacity_factor = args.capacity_factor
     added = add_chat_tokens(tok)
     model.resize_vocab(tok.vocab_size)
     if args.moe_backend != "auto":
