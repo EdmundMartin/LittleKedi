@@ -101,7 +101,9 @@ class LittleKediModel(nn.Module):
         # Kept in high precision. With tied embeddings the head reuses embed.weight.
         self.head = None if cfg.tie_embeddings else nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
 
-        cos, sin = precompute_rope(cfg.qk_rope_head_dim, cfg.max_seq_len, cfg.rope_theta)
+        yarn = (dict(factor=cfg.rope_factor, original_seq_len=cfg.rope_original_seq_len,
+                     beta_fast=cfg.rope_beta_fast, beta_slow=cfg.rope_beta_slow) if cfg.yarn_active else None)
+        cos, sin = precompute_rope(cfg.qk_rope_head_dim, cfg.max_seq_len, cfg.rope_theta, yarn)
         self.register_buffer("rope_cos", cos, persistent=False)
         self.register_buffer("rope_sin", sin, persistent=False)
         self.apply(self._init_weights)

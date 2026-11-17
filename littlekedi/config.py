@@ -39,6 +39,13 @@ class ModelConfig:
     qk_rope_head_dim: int = 16  # per-head dims that carry position (decoupled RoPE)
     v_head_dim: int = 32
     rope_theta: float = 10000.0
+    # YaRN context extension, as in DeepSeek-V3. Only active once max_seq_len exceeds rope_original_seq_len,
+    # i.e. in a later run that extends the context; pretraining at the native length is plain RoPE. 0 = never.
+    rope_original_seq_len: int = 0  # the length pretrained at
+    rope_factor: float = 1.0  # planned extension (new length / original length)
+    rope_beta_fast: float = 32.0  # dims rotating faster than this many times over the original length: unchanged
+    rope_beta_slow: float = 1.0  # dims rotating slower than this: fully interpolated (divided by rope_factor)
+    rope_mscale: float = 1.0  # attention temperature: softmax scale *= (0.1 * mscale * ln(factor) + 1) ** 2
 
     # --- DeepSeekMoE ---
     n_routed_experts: int = 8
@@ -79,6 +86,11 @@ class ModelConfig:
     @property
     def n_moe_layers(self) -> int:
         return self.n_layers - self.n_dense_layers
+
+    @property
+    def yarn_active(self) -> bool:
+        """YaRN applies only when extending beyond the pretraining length (as in DeepSeek-V3)."""
+        return 0 < self.rope_original_seq_len < self.max_seq_len and self.rope_factor > 1
 
     def tokens_per_expert(self, train_tokens: float) -> float:
         """Tokens each routed expert sees per MoE layer over a run (assuming balanced routing)."""
@@ -158,9 +170,11 @@ SIZES: dict[str, dict] = {
         n_expert_groups=4, n_limited_groups=2, max_seq_len=1024,
     ),
     # Between small and medium; the sparse twin is the one to match against Wisp-15M at equal compute.
+    # Two dense layers (as DeepSeek-V3 keeps its first three): with one, the first MoE layer's routing never
+    # balanced in moderate-wide-sparse (top choices nearly tied, load oscillated). Same active compute either way.
     "moderate": dict(
         vocab_size=16384,
-        dim=384, n_layers=8, n_dense_layers=1, dense_hidden_dim=1056,
+        dim=384, n_layers=8, n_dense_layers=2, dense_hidden_dim=1056,
         n_heads=8, q_lora_rank=192, kv_lora_rank=96,
         qk_nope_head_dim=48, qk_rope_head_dim=16, v_head_dim=48,
         n_routed_experts=24, n_shared_experts=1, n_activated_experts=4, moe_hidden_dim=192,
@@ -168,11 +182,13 @@ SIZES: dict[str, dict] = {
     ),
     "medium": dict(
         vocab_size=16384,
-        dim=512, n_layers=8, n_dense_layers=1, dense_hidden_dim=1408,
+        dim=512, n_layers=8, n_dense_layers=2, dense_hidden_dim=1408,  # 2 dense layers: see moderate
         n_heads=8, q_lora_rank=256, kv_lora_rank=128,
         qk_nope_head_dim=64, qk_rope_head_dim=32, v_head_dim=64,
         n_routed_experts=24, n_shared_experts=1, n_activated_experts=4, moe_hidden_dim=256,
         n_expert_groups=4, n_limited_groups=2, max_seq_len=2048,
+        # YaRN for a later context extension to 4x (8,192): inactive at the 2,048 pretraining length.
+        rope_original_seq_len=2048, rope_factor=4.0,
     ),
     "base": dict(
         vocab_size=32768,
@@ -181,6 +197,8 @@ SIZES: dict[str, dict] = {
         qk_nope_head_dim=64, qk_rope_head_dim=32, v_head_dim=64,
         n_routed_experts=32, n_shared_experts=2, n_activated_experts=6, moe_hidden_dim=256,
         n_expert_groups=4, n_limited_groups=2, max_seq_len=4096, init_std=0.006,
+        # YaRN for a later context extension to 4x (16,384): inactive at the 4,096 pretraining length.
+        rope_original_seq_len=4096, rope_factor=4.0,
     ),
 }
 

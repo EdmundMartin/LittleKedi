@@ -36,8 +36,42 @@ class RMSNorm(nn.Module):
         return xf.to(x.dtype) * self.weight
 
 
-def precompute_rope(head_dim: int, max_seq_len: int, theta: float) -> tuple[torch.Tensor, torch.Tensor]:
+def yarn_correction_range(beta_fast: float, beta_slow: float, head_dim: int, theta: float,
+                          original_seq_len: int) -> tuple[int, int]:
+    """Dim-pair indices bounding YaRN's ramp: below `low`, a dim rotates more than beta_fast times over the
+    original length (high frequency: kept); above `high`, fewer than beta_slow times (interpolated)."""
+    def dim_for(rotations: float) -> float:
+        return head_dim * math.log(original_seq_len / (rotations * 2 * math.pi)) / (2 * math.log(theta))
+    low = math.floor(dim_for(beta_fast))
+    high = math.ceil(dim_for(beta_slow))
+    return max(low, 0), min(high, head_dim - 1)
+
+
+def yarn_inv_freq(head_dim: int, theta: float, factor: float, original_seq_len: int,
+                  beta_fast: float, beta_slow: float) -> torch.Tensor:
+    """YaRN ("NTK-by-parts") frequencies, as in DeepSeek-V3: high-frequency dims unchanged, low-frequency dims
+    divided by `factor`, a linear ramp in between."""
     inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    low, high = yarn_correction_range(beta_fast, beta_slow, head_dim, theta, original_seq_len)
+    ramp = ((torch.arange(head_dim // 2).float() - low) / max(high - low, 1e-3)).clamp(0, 1)
+    keep = 1 - ramp  # 1 = keep the original frequency, 0 = fully interpolated
+    return inv_freq / factor * (1 - keep) + inv_freq * keep
+
+
+def yarn_softmax_scale(factor: float, mscale: float) -> float:
+    """Attention temperature correction for YaRN: multiplies the softmax scale."""
+    m = 0.1 * mscale * math.log(factor) + 1.0
+    return m * m
+
+
+def precompute_rope(head_dim: int, max_seq_len: int, theta: float, yarn: dict | None = None
+                    ) -> tuple[torch.Tensor, torch.Tensor]:
+    """cos/sin tables; `yarn` (factor, original_seq_len, beta_fast, beta_slow) switches to YaRN frequencies."""
+    if yarn:
+        inv_freq = yarn_inv_freq(head_dim, theta, yarn["factor"], yarn["original_seq_len"],
+                                 yarn["beta_fast"], yarn["beta_slow"])
+    else:
+        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
     t = torch.arange(max_seq_len).float()
     freqs = torch.outer(t, inv_freq)  # [T, head_dim/2]
     return freqs.cos(), freqs.sin()
@@ -60,6 +94,8 @@ class MLA(nn.Module):
         self.v_dim = cfg.v_head_dim
         self.kv_lora_rank = cfg.kv_lora_rank
         self.scale = 1.0 / math.sqrt(cfg.qk_head_dim)
+        if cfg.yarn_active:  # YaRN's attention temperature, as in DeepSeek-V3
+            self.scale *= yarn_softmax_scale(cfg.rope_factor, cfg.rope_mscale)
         lin = lambda i, o: nn.Linear(i, o, bias=False)
 
         # Queries: optionally compressed too (reduces activation memory in training).

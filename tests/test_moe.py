@@ -42,6 +42,22 @@ def test_capacity_drops_overflow_and_reports_it():
     assert torch.isfinite(out).all()
 
 
+def test_capacity_ignores_padding():
+    """Identical pad tokens all route to the same experts; they mustn't use capacity or count as dropped."""
+    torch.manual_seed(0)
+    x = torch.randn(4, 48, 192)
+    mask = torch.ones(4, 48, dtype=torch.bool)
+    mask[:, 16:] = False
+    x[~mask] = x[0, 0].clone()  # every pad position identical, as in a padded SFT batch
+    ref, _ = moe_layer("sorted")(x, mask)
+    moe = moe_layer("capacity", capacity_factor=2.0)
+    out, stats = moe(x, mask)
+    assert stats["dropped"].item() < 0.05  # real tokens fit; padding isn't counted
+    torch.testing.assert_close(out[mask], ref[mask], atol=1e-4, rtol=1e-3)
+    unmasked, stats_unmasked = moe(x)  # the same batch without a mask: the pads crowd real tokens out
+    assert stats_unmasked["dropped"].item() > stats["dropped"].item()
+
+
 def test_capacity_places_first_choices_before_second_choices():
     """With room for exactly one assignment per token, every kept assignment is a top-1 choice."""
     moe = moe_layer("capacity")

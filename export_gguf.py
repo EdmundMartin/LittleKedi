@@ -88,6 +88,8 @@ def add_hparams(w: gguf.GGUFWriter, cfg: ModelConfig) -> None:
     w.add_feed_forward_length(cfg.dense_hidden_dim)
     w.add_head_count(cfg.n_heads)
     w.add_head_count_kv(1)  # MLA is run as MQA over the shared latent
+    if cfg.yarn_active:  # writing YaRN metadata isn't implemented yet; without it the GGUF would be silently wrong
+        raise NotImplementedError("GGUF export of a YaRN-extended model (rope_factor / rope_original_seq_len)")
     w.add_rope_freq_base(cfg.rope_theta)
     w.add_layer_norm_rms_eps(cfg.norm_eps)
     w.add_vocab_size(cfg.vocab_size)

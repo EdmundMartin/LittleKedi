@@ -193,7 +193,7 @@ class MoE(nn.Module):
 
         backend = self.backend()
         if backend == "capacity":
-            out, stats["dropped"] = self._dispatch_capacity(flat, weights, indices)
+            out, stats["dropped"] = self._dispatch_capacity(flat, weights, indices, None if mask is None else mask.reshape(-1))
         else:
             out = self._dispatch_sorted(flat, weights, indices, grouped=backend == "grouped_mm")
 
@@ -201,8 +201,12 @@ class MoE(nn.Module):
             out = out + self.shared(flat)
         return out.view(B, T, D), stats
 
-    def _dispatch_capacity(self, flat, weights, indices) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fixed-capacity dispatch: scatter into [E, C, D], 3 batched matmuls, gather back."""
+    def _dispatch_capacity(self, flat, weights, indices, real: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fixed-capacity dispatch: scatter into [E, C, D], 3 batched matmuls, gather back.
+
+        real: optional [N] bool of real (non-padding) tokens. Padding takes no capacity and gets no expert output;
+        without this, a padded batch's identical pad tokens all pick the same experts and crowd real tokens out.
+        """
         N, D = flat.shape
         K, E = indices.shape[1], self.cfg.n_routed_experts
         C = capacity(N, E, K, self.cfg.capacity_factor)
@@ -211,12 +215,15 @@ class MoE(nn.Module):
         # choice; within a choice rank, earlier tokens first. Over-capacity assignments are dropped.
         expert = indices.t().reshape(-1)  # [K*N]
         token = torch.arange(N, device=flat.device).repeat(K)
+        valid = None if real is None else real.repeat(K)
+        if valid is not None:  # padding goes to a virtual expert E that has no slots
+            expert = torch.where(valid, expert, E)
         order = expert.argsort(stable=True)
-        counts = _expert_counts(expert, E).long()
+        counts = _expert_counts(expert, E + 1).long()
         starts = counts.cumsum(0) - counts
         rank_sorted = torch.arange(K * N, device=flat.device) - starts[expert[order]]
         rank = torch.empty_like(rank_sorted).scatter_(0, order, rank_sorted)  # position within its expert
-        keep = rank < C
+        keep = rank < C if valid is None else (rank < C) & valid
         slot = torch.where(keep, expert * C + rank, E * C)  # dropped assignments -> a spare zero row
 
         # slot -> source token; unfilled slots read the zero row at index N.
@@ -227,7 +234,10 @@ class MoE(nn.Module):
 
         y = torch.cat([y_e, y_e.new_zeros(1, D)]).index_select(0, slot)  # [K*N, D]; dropped -> 0
         out = (y * weights.t().reshape(-1, 1).to(y.dtype)).view(K, N, D).sum(0)
-        dropped = 1.0 - keep.float().mean()
+        if valid is None:
+            dropped = 1.0 - keep.float().mean()
+        else:  # share of *real* assignments dropped (no host sync)
+            dropped = 1.0 - keep.float().sum() / valid.float().sum().clamp(min=1)
         return out.to(flat.dtype), dropped
 
     def _dispatch_sorted(self, flat, weights, indices, grouped: bool = False) -> torch.Tensor:
