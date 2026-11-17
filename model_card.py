@@ -74,6 +74,12 @@ DATASETS = {
     "cosmo-openstax": ("HuggingFaceTB/cosmopedia", "Cosmopedia (OpenStax)", "synthetic textbooks", "Apache 2.0"),
     "cosmo-wikihow": ("HuggingFaceTB/cosmopedia", "Cosmopedia (WikiHow)", "synthetic how-to articles", "Apache 2.0"),
     "cosmo-khanacademy": ("HuggingFaceTB/cosmopedia", "Cosmopedia (Khan Academy)", "synthetic lessons", "Apache 2.0"),
+    "cosmo-v2": ("HuggingFaceTB/smollm-corpus", "Cosmopedia v2 (SmolLM-Corpus)", "synthetic textbooks and stories",
+                 "ODC-BY 1.0"),
+    "wikipedia": ("wikimedia/wikipedia", "Wikipedia (English, 2023-11-01)", "encyclopedia articles",
+                  "CC BY-SA 3.0 and GFDL"),
+    "reddit": ("HuggingFaceGECLM/REDDIT_comments", "Reddit comments", "forum comments",
+               "no license stated on the dataset card; the comments are Reddit users' content"),
     "finemath": ("HuggingFaceTB/finemath", "FineMath 4+", "maths web pages", "ODC-BY 1.0"),
     "smoltalk": ("HuggingFaceTB/smoltalk", "SmolTalk", "chat conversations",
                  "Apache 2.0 for its new subsets, with the datasets it includes under their own licenses"),
@@ -436,7 +442,7 @@ def sft_section(sft: dict, base_link: str) -> str:
                                             for d in sft["data"]) + " |")
     rows.append("| Loss | On assistant replies and their closing `<|end|>` only; prompts and padding are masked |")
     if "steps" in sft:
-        rows.append(f"| Schedule | {sft['steps']:,} steps, batch {sft['batch_size']}, {sft['epochs']:g} epochs, "
+        rows.append(f"| Schedule | {sft['steps']:,} steps, batch {sft['batch_size']}, {sft['epochs']:g} epoch{'' if sft['epochs'] == 1 else 's'}, "
                     f"{'Muon + AdamW' if sft.get('optimizer') == 'muon' else 'AdamW'}, peak LR {sci(sft['lr'])}, cosine decay |")
     rows.append("| MoE routing | Load-balancing biases " + ("**kept updating** during SFT" if sft.get("update_moe_bias")
                 else "**frozen** at their pretrained values") + ", with padding excluded from expert-load statistics; "

@@ -1,0 +1,3 @@
+{"ckpt": "checkpoints/small-wide-sparse-sft.pt", "step": 64085, "time": "2026-10-20 12:36", "arithmetic": {"acc": 0.16666666666666666, "n": 300}, "mbpp": {"acc": 0.008, "n": 500}, "identity": {"acc": 0.72, "n": 25}}
+{"ckpt": "checkpoints/moderate-wide-sparse-sft.pt", "step": 190733, "time": "2026-10-21 10:13", "arithmetic": {"acc": 0.43666666666666665, "n": 300}, "mbpp": {"acc": 0.018, "n": 500}, "identity": {"acc": 0.64, "n": 25}}
+{"ckpt": "checkpoints/medium-wide-sparse-sft.pt", "step": 311278, "time": "2026-11-01 14:16", "arithmetic": {"acc": 0.38333333333333336, "n": 300}, "mbpp": {"acc": 0.03, "n": 500}, "identity": {"acc": 0.6, "n": 25}}
