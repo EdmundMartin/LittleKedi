@@ -100,8 +100,8 @@ def hf_token() -> str:
 def cmd_push_data(a) -> None:
     from huggingface_hub import HfApi
     api = HfApi()
-    api.create_repo(a.repo, repo_type="dataset", private=True, exist_ok=True)
-    print(f"uploading {a.dir} -> {a.repo} (private dataset); resumable, re-run if interrupted")
+    api.create_repo(a.repo, repo_type="dataset", private=not a.public, exist_ok=True)
+    print(f"uploading {a.dir} -> {a.repo} ({'public' if a.public else 'private'} dataset); resumable, re-run if interrupted")
     api.upload_large_folder(repo_id=a.repo, repo_type="dataset", folder_path=a.dir)
     print("done")
 
@@ -121,7 +121,12 @@ def cmd_launch(a) -> None:
             # hosts whose driver can run the image's CUDA; any older one fails at the first CUDA call
             "allowedCudaVersions": [v for v in CUDA_VERSIONS if float(v) >= float(a.min_cuda)],
             "dockerEntrypoint": ["bash", "-lc"], "dockerStartCmd": [start], "env": env}
-    shown = {**body, "env": {**env, "HF_TOKEN": "<LK_HF_TOKEN>"}}
+    # some Community hosts upload at ~2 Mbit/s, too slow to sync a checkpoint every --sync-minutes
+    if a.min_upload:
+        body["minUploadMbps"] = a.min_upload
+    if a.min_download:
+        body["minDownloadMbps"] = a.min_download
+    shown ={**body, "env": {**env, "HF_TOKEN": "<LK_HF_TOKEN>"}}
     if a.dry_run:
         print(json.dumps(shown, indent=2))
         return
@@ -162,6 +167,36 @@ def _run_finished(run: str, runs_repo: str) -> bool:
         return False
     return any(json.loads(line).get("event") == "end"
                for line in Path(p).read_text(encoding="utf-8-sig").splitlines() if line.strip())
+
+
+def cmd_squash_watch(a) -> None:
+    """Keep the runs repo's storage to ~one copy of each checkpoint: squash its history right after each new sync.
+
+    Every sync is a new commit and Hugging Face keeps every old checkpoint version. Squashing only happens just
+    after a *new* sync commit appears: a pod syncs only once it has trained for --sync-minutes, so this never
+    lands during a pod's start-up download (squashing then broke a resume once). Uses your own HF login.
+    Squashing permanently deletes the repo's old versions.
+    """
+    import time
+    from huggingface_hub import HfApi
+    from littlekedi.runtime import keep_awake
+    keep_awake("LittleKedi squash-watch", display=False)
+    api = HfApi()
+    seen = api.list_repo_commits(a.runs_repo)[0].commit_id
+    print(f"watching {a.runs_repo}: squashing {a.delay:.0f}s after each new '{a.run}: sync' commit", flush=True)
+    while True:
+        try:
+            head = api.list_repo_commits(a.runs_repo)[0]
+            if head.commit_id != seen and head.title == f"{a.run}: sync":
+                time.sleep(a.delay)  # let the sync finish settling; the next one is minutes away
+                api.super_squash_history(a.runs_repo, commit_message=f"Squash history after {a.run} sync")
+                print(f"{time.strftime('%H:%M')} squashed after sync {head.commit_id[:8]} "
+                      f"({head.created_at:%H:%M} UTC)", flush=True)
+                head = api.list_repo_commits(a.runs_repo)[0]
+            seen = head.commit_id
+        except Exception as e:  # network blips etc.: try again next round
+            print(f"{time.strftime('%H:%M')} check failed, retrying: {type(e).__name__}: {e}", flush=True)
+        time.sleep(a.every * 60)
 
 
 def cmd_watch(a) -> None:
@@ -219,6 +254,7 @@ def main() -> None:
 
     p = sub.add_parser("push-data", help="upload a prepared dataset dir to a private HF dataset repo")
     p.add_argument("dir"); p.add_argument("--repo", required=True)
+    p.add_argument("--public", action="store_true", help="create the repo public (an existing repo keeps its visibility)")
     p.set_defaults(fn=cmd_push_data)
 
     p = sub.add_parser("launch", help="start a pod that trains one run")
@@ -231,12 +267,14 @@ def main() -> None:
                         "the run's runs-repo folder are restored to checkpoints/ first; checkpoints/<run>.* and "
                         "<run>-* are synced back. Without --data-repo, no dataset is downloaded")
     p.add_argument("--gpu", nargs="+", default=["NVIDIA GeForce RTX 4090"], help="RunPod GPU type ids, in priority order")
-    p.add_argument("--cloud", choices=["COMMUNITY", "SECURE"], default="COMMUNITY")
+    p.add_argument("--cloud", choices=["COMMUNITY", "SECURE"], default="SECURE")
     p.add_argument("--spot", action="store_true", help="interruptible (cheaper; resumes from the last sync if killed)")
     p.add_argument("--image", default=DEFAULT_IMAGE)
     p.add_argument("--min-cuda", default="12.8", choices=CUDA_VERSIONS,
                    help="only hosts whose driver supports at least this CUDA (match the image's)")
     p.add_argument("--disk", type=int, default=60, help="container disk in GB (dataset + checkpoints)")
+    p.add_argument("--min-upload", type=int, default=0, help="only hosts with at least this upload speed, Mbit/s")
+    p.add_argument("--min-download", type=int, default=0, help="only hosts with at least this download speed, Mbit/s")
     p.add_argument("--runs-repo", default=DEFAULT_RUNS_REPO)
     p.add_argument("--sync-minutes", type=int, default=30)
     p.add_argument("--max-hours", type=float, default=48, help="safety limit; training stops and the pod ends")
@@ -252,6 +290,12 @@ def main() -> None:
     p.add_argument("--every", type=float, default=5, help="minutes between checks")
     p.add_argument("--grace", type=float, default=10, help="minutes to let the pod delete itself first")
     p.set_defaults(fn=cmd_watch)
+    p = sub.add_parser("squash-watch", help="squash the runs repo's history after each new sync (saves storage; "
+                                            "permanently deletes old checkpoint versions)")
+    p.add_argument("run", help="squash after this run's syncs"); p.add_argument("--runs-repo", default=DEFAULT_RUNS_REPO)
+    p.add_argument("--every", type=float, default=1, help="minutes between checks")
+    p.add_argument("--delay", type=float, default=60, help="seconds to wait after a new sync before squashing")
+    p.set_defaults(fn=cmd_squash_watch)
     for name, fn, help_ in (("logs", cmd_logs, "tail a run's synced training log"),
                             ("pull", cmd_pull, "copy a run's synced checkpoints and logs into checkpoints/")):
         p = sub.add_parser(name, help=help_)

@@ -35,6 +35,7 @@ import numpy as np
 import torch
 
 from littlekedi import LittleKediModel, ModelConfig
+from littlekedi.data import load_train_tokens
 from littlekedi.optim import build_optimizer, lr_at
 from littlekedi.runtime import autocast, keep_awake, pick_device, resolve_precision, setup_backends
 from littlekedi.tokenizer import BPETokenizer, default_vocab, encode_files
@@ -234,7 +235,7 @@ def main() -> None:
     if args.data_dir:
         d = Path(args.data_dir)
         tokenizer = BPETokenizer.from_file(d / "tokenizer.json")
-        train_data = np.memmap(d / "train.bin", dtype=np.uint16, mode="r")
+        train_data = load_train_tokens(d)
         if args.max_train_tokens:
             train_data = train_data[: int(args.max_train_tokens)]
         val_sets = load_val_sets(d)
