@@ -10,3 +10,7 @@ release/
 *.gguf
 benchmark_report.html
 .env
+
+# Gradio Space (space-gradio/): local test venv and the copied model package (sync_package.py makes it)
+space-gradio/.venv/
+space-gradio/littlekedi/

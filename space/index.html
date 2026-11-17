@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LittleKedi's Reading Nook</title>
+<meta name="description" content="Chat with LittleKedi, a tiny cat from Istanbul who has read a lot. The models run in your browser.">
+<link rel="icon" href="assets/kedi_avatar.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;800&display=swap">
+<style>
+  :root {
+    --terracotta: #C8673A; --terracotta-dark: #A9532B; --cream: #FFF4E2; --card: #FFFBF4;
+    --bosphorus: #2E6F8E; --ink: #3A2A22; --muted: #7A6A5E; --line: #EBD3B5; --bubble-cat: #FFFFFF;
+    --bubble-you: #E3EEF3; --paw: rgba(200, 103, 58, 0.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --cream: #231B16; --card: #2E2520; --ink: #F3E6D8; --muted: #BFAE9F; --line: #4A3A30;
+      --bubble-cat: #3A2F28; --bubble-you: #22394A; --paw: rgba(232, 149, 74, 0.06);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font-family: "Nunito", ui-sans-serif, system-ui, sans-serif; color: var(--ink); background-color: var(--cream);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'><g fill='%23C8673A' fill-opacity='0.07'><ellipse cx='30' cy='36' rx='9' ry='7'/><circle cx='21' cy='25' r='3.2'/><circle cx='27' cy='21' r='3.2'/><circle cx='34' cy='21' r='3.2'/><circle cx='40' cy='25' r='3.2'/><ellipse cx='88' cy='92' rx='9' ry='7'/><circle cx='79' cy='81' r='3.2'/><circle cx='85' cy='77' r='3.2'/><circle cx='92' cy='77' r='3.2'/><circle cx='98' cy='81' r='3.2'/></g></svg>");
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; gap: 18px; margin: 4px 0 12px; }
+  header img { width: 88px; height: 88px; flex: none; }
+  h1 { margin: 0; color: var(--terracotta); font-size: clamp(1.5rem, 4vw, 2.1rem); font-weight: 800; }
+  header p { margin: 4px 0 0; line-height: 1.45; }
+  .note { border-left: 4px solid var(--bosphorus); background: rgba(46, 111, 142, 0.09); padding: 8px 12px;
+          border-radius: 8px; font-size: 0.93rem; line-height: 1.45; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-top: 12px; }
+  .picker { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 14px; align-items: start; }
+  @media (max-width: 640px) { .picker { grid-template-columns: 1fr; } header img { width: 64px; height: 64px; } }
+  label.title { display: block; font-weight: 800; color: var(--terracotta); margin-bottom: 6px; }
+  select, textarea, button { font: inherit; color: inherit; }
+  select { width: 100%; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--cream); }
+  .catcard { border: 2px dashed var(--terracotta); border-radius: 12px; padding: 8px 12px; font-size: 0.92rem; line-height: 1.45; }
+  details summary { cursor: pointer; font-weight: 800; color: var(--terracotta); }
+  .sliders { display: grid; gap: 10px; margin-top: 10px; }
+  .sliders label { display: grid; grid-template-columns: 11rem 1fr 3.2rem; gap: 10px; align-items: center; font-size: 0.92rem; }
+  @media (max-width: 640px) { .sliders label { grid-template-columns: 1fr 3.2rem; } .sliders label span.name { grid-column: 1 / -1; } }
+  .sliders small { color: var(--muted); }
+  input[type=range] { accent-color: var(--terracotta); width: 100%; }
+  .progress { display: none; margin-top: 10px; }
+  .progress.on { display: block; }
+  .bar { position: relative; height: 12px; background: var(--line); border-radius: 99px; margin: 14px 0 6px; }
+  .bar .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--terracotta); border-radius: 99px; transition: width 0.2s; }
+  .bar .walker { position: absolute; top: -17px; left: 0; font-size: 1.3rem; transform: translateX(-50%) scaleX(-1); transition: left 0.2s; }
+  .chat { margin-top: 12px; min-height: 320px; max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 14px; }
+  .empty { margin: auto; text-align: center; color: var(--muted); }
+  .msg { display: flex; gap: 10px; align-items: flex-start; max-width: 92%; }
+  .msg img { width: 38px; height: 38px; flex: none; }
+  .msg .bubble { padding: 9px 13px; border-radius: 14px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line); }
+  .msg.cat .bubble { background: var(--bubble-cat); border-top-left-radius: 4px; }
+  .msg.you { align-self: flex-end; flex-direction: row-reverse; }
+  .msg.you .bubble { background: var(--bubble-you); border-top-right-radius: 4px; }
+  .bubble pre { white-space: pre; overflow-x: auto; background: rgba(0,0,0,0.06); padding: 8px 10px; border-radius: 8px; margin: 6px 0; font-size: 0.88rem; }
+  .bubble.thinking { color: var(--muted); font-style: italic; }
+  .examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .chip { border: 1px solid var(--terracotta); color: var(--terracotta); background: transparent; border-radius: 99px; padding: 4px 12px; cursor: pointer; font-size: 0.9rem; }
+  .chip:hover { background: rgba(200, 103, 58, 0.1); }
+  .composer { display: flex; gap: 8px; margin-top: 10px; }
+  textarea { flex: 1; min-height: 46px; max-height: 160px; resize: vertical; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); }
+  .btn { border: none; border-radius: 12px; padding: 0 16px; font-weight: 800; cursor: pointer; background: var(--terracotta); color: #fff; }
+  .btn:hover { background: var(--terracotta-dark); }
+  .btn.ghost { background: transparent; color: var(--terracotta); border: 1px solid var(--terracotta); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  footer { text-align: center; color: var(--muted); font-size: 0.85rem; margin: 18px 0 8px; line-height: 1.6; }
+  footer a { color: var(--bosphorus); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="assets/kedi_avatar.svg" alt="LittleKedi, an orange tabby cat in reading glasses">
+    <div>
+      <h1>LittleKedi's Reading Nook</h1>
+      <p><b>Merhaba!</b> I'm LittleKedi, a small cat from Istanbul who has read a lot. <i>"Kedi"</i> is Turkish for
+        cat. Pick a cat, pull up a cushion, and ask me something. 🐾</p>
+    </div>
+  </header>
+
+  <div class="note">😺 <b>A very small cat with a very small brain.</b> These are tiny research models (the biggest has
+    ~23M parameters awake per word; chatbots you know have thousands of times more). They write fluently but
+    <b>get facts, numbers and code wrong a lot</b>. Please don't trust anything they say! The cat runs entirely
+    <b>in your browser</b>: nothing you type leaves your device.</div>
+
+  <div class="panel">
+    <div class="picker">
+      <div>
+        <label class="title" for="cat">🐈 Choose your cat</label>
+        <select id="cat"></select>
+        <div class="progress" id="progress">
+          <div class="bar"><div class="fill" id="fill"></div><div class="walker" id="walker">🐈</div></div>
+          <small id="progressText">Waking the cat up…</small>
+        </div>
+      </div>
+      <div class="catcard" id="card"></div>
+    </div>
+    <details style="margin-top:12px">
+      <summary>🧶 Purr-ameters</summary>
+      <div class="sliders">
+        <label><span class="name">Curiosity <small>(temperature)</small></span>
+          <input type="range" id="temp" min="0.1" max="1.5" step="0.05" value="0.3"><output id="tempOut">0.30</output></label>
+        <label><span class="name">Attention span <small>(max reply tokens)</small></span>
+          <input type="range" id="maxTok" min="32" max="400" step="8" value="200"><output id="maxTokOut">200</output></label>
+        <label><span class="name">Chattiness <small>(top-p)</small></span>
+          <input type="range" id="topP" min="0.3" max="1" step="0.05" value="0.9"><output id="topPOut">0.90</output></label>
+      </div>
+    </details>
+  </div>
+
+  <div class="panel chat" id="chat" aria-live="polite">
+    <div class="empty" id="empty">🐾 <b>Kedi is curled up, waiting for a question…</b><br>
+      <small>The first time you pick a cat, it downloads once (a few MB to ~340 MB) and is cached for next time.</small></div>
+  </div>
+
+  <div class="examples" id="examples"></div>
+  <div class="composer">
+    <textarea id="input" placeholder="Ask LittleKedi something… 🐾" rows="1"></textarea>
+    <button class="btn" id="send">Send</button>
+    <button class="btn ghost" id="stop" style="display:none">Stop</button>
+    <button class="btn ghost" id="clear" title="Start a new conversation">New chat</button>
+  </div>
+
+  <footer>
+    Trained from scratch on open data · runs on <a href="https://github.com/ngxson/wllama" target="_blank" rel="noopener">wllama</a>
+    (llama.cpp in WebAssembly) ·
+    <a href="https://huggingface.co/edededdy" target="_blank" rel="noopener">the cats on Hugging Face</a> ·
+    <a href="https://github.com/EdmundMartin/LittleKedi" target="_blank" rel="noopener">training code</a> 🐟
+  </footer>
+</div>
+
+<script type="module">
+import { Wllama } from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js";
+const WASM = { default: "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm" };
+const OWNER = "edededdy";
+
+// ctx: the context window each cat was trained with (prompt and reply together).
+const CATS = [
+  { name: "📚 Medium Kedi: the bookish one (305M)", id: "medium-wide-sparse-instruct", mb: 336, ctx: 2048,
+    card: "<b>The bookish one.</b> The biggest LittleKedi: 305M parameters, of which only ~23M wake up for each word (240 tiny experts, 8 chosen per token). Read <b>20.4B tokens</b> and remembers twice as much of the conversation. SciQ 74% · ARC-Easy 46% · HellaSwag 36% · simple sums right ~38% of the time." },
+  { name: "🐈 Moderate Kedi: the well-read one (173M)", id: "moderate-wide-sparse-instruct", mb: 193, ctx: 1024,
+    card: "<b>The well-read one.</b> 173M parameters, of which only ~19M wake up for each word (240 tiny experts, 8 chosen per token). Read <b>12.5B tokens</b>. SciQ 67% · ARC-Easy 46% · HellaSwag 32% · simple sums right ~44% of the time." },
+  { name: "🐱 Small Kedi: the curious one (44M)", id: "small-wide-sparse-instruct", mb: 50, ctx: 1024,
+    card: "<b>The curious one.</b> 44M parameters, ~6.5M active per word (160 experts). Read <b>4.2B tokens</b>. SciQ 63% · ARC-Easy 37% · HellaSwag 29% · simple sums right ~17% of the time." },
+  { name: "🐾 Tiny Kedi (wide): the kitten (3.8M)", id: "tiny-wide-sparse-instruct", mb: 5, ctx: 1024,
+    card: "<b>The kitten.</b> 3.8M parameters, ~1.6M active per word. Read <b>1B tokens</b>. Knows the shape of a conversation and not much else: SciQ 55% · ARC-Easy 32%." },
+  { name: "🐾 Tiny Kedi: the littlest kitten (2M)", id: "tiny-instruct", mb: 4, ctx: 1024,
+    card: "<b>The littlest kitten.</b> 2M parameters, ~1.5M active per word. Read <b>1B tokens</b>. Mostly purrs: SciQ 56% · ARC-Easy 32%." },
+];
+const EXAMPLES = ["Who are you?", "What is photosynthesis?", "Tell me about Istanbul.", "What is 7 + 6?",
+                  "Give me three tips for looking after a cat.", "Write a Python function that reverses a string."];
+
+const $ = (id) => document.getElementById(id);
+const els = { cat: $("cat"), card: $("card"), chat: $("chat"), empty: $("empty"), input: $("input"), send: $("send"),
+              stop: $("stop"), clear: $("clear"), progress: $("progress"), fill: $("fill"), walker: $("walker"),
+              progressText: $("progressText"), examples: $("examples") };
+
+let wllama = null, loadedId = null, loading = null, busy = false, abort = null;
+let history = [];  // [{role, content}]
+
+for (const [i, c] of CATS.entries()) els.cat.add(new Option(c.name, String(i)));
+// Start on Moderate: Medium is the biggest, but a ~340 MB download is a lot to ask before the first question.
+els.cat.value = String(CATS.findIndex((c) => c.id === "moderate-wide-sparse-instruct"));
+const showCard = () => { els.card.innerHTML = CATS[+els.cat.value].card; };
+showCard();
+for (const q of EXAMPLES) {
+  const b = document.createElement("button");
+  b.className = "chip"; b.textContent = q; b.onclick = () => { els.input.value = q; send(); };
+  els.examples.append(b);
+}
+for (const [id, fmt] of [["temp", (v) => (+v).toFixed(2)], ["maxTok", (v) => v], ["topP", (v) => (+v).toFixed(2)]]) {
+  const r = $(id), o = $(id + "Out");
+  r.oninput = () => { o.textContent = fmt(r.value); };
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+// Just enough formatting for these replies: code blocks, inline code and bold.
+function render(text) {
+  return escapeHtml(text)
+    .replace(/```(?:\w+)?\n?([\s\S]*?)(```|$)/g, (_, code) => `<pre>${code}</pre>`)
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+}
+
+function addMessage(role, text) {
+  els.empty.style.display = "none";
+  const row = document.createElement("div");
+  row.className = `msg ${role === "user" ? "you" : "cat"}`;
+  const img = document.createElement("img");
+  img.src = role === "user" ? "assets/paw_avatar.svg" : "assets/kedi_avatar.svg";
+  img.alt = role === "user" ? "You" : "LittleKedi";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.innerHTML = render(text);
+  row.append(img, bubble);
+  els.chat.append(row);
+  els.chat.scrollTop = els.chat.scrollHeight;
+  return bubble;
+}
+
+function setProgress(fraction, text) {
+  const pct = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+  els.fill.style.width = pct + "%";
+  els.walker.style.left = pct + "%";
+  els.progressText.textContent = text ?? `Waking the cat up… ${pct}%`;
+}
+
+async function ensureCat() {
+  const cat = CATS[+els.cat.value];
+  if (loadedId === cat.id) return;
+  if (loading) await loading.catch(() => {});
+  if (loadedId === cat.id) return;
+  loading = (async () => {
+    els.progress.classList.add("on");
+    setProgress(0, `Waking ${cat.name.split(":")[0].replace(/^\S+\s/, "")} up… (~${cat.mb} MB the first time)`);
+    if (wllama) { await wllama.exit(); wllama = null; loadedId = null; }
+    const w = new Wllama(WASM);
+    await w.loadModelFromHF(
+      { repo: `${OWNER}/LittleKedi-${cat.id}-GGUF`, file: `LittleKedi-${cat.id}-q8_0.gguf` },
+      { n_ctx: cat.ctx, n_gpu_layers: 0, progressCallback: ({ loaded, total }) => setProgress(total ? loaded / total : 0) },
+    );
+    wllama = w; loadedId = cat.id;
+    setProgress(1, "Awake! 🐾");
+    setTimeout(() => els.progress.classList.remove("on"), 800);
+  })();
+  try { await loading; } finally { loading = null; }
+}
+
+// Keep the conversation inside the cat's context window: drop the oldest turns (roughly 3.5 characters per token).
+function fitHistory(maxTokens) {
+  const budget = (CATS[+els.cat.value].ctx - maxTokens - 32) * 3.5;
+  let msgs = history.slice();
+  const size = (m) => m.reduce((n, x) => n + x.content.length + 8, 0);
+  while (msgs.length > 1 && size(msgs) > budget) msgs = msgs.slice(msgs.length > 2 ? 2 : 1);
+  return msgs;
+}
+
+function setBusy(on) {
+  busy = on;
+  els.send.disabled = on; els.cat.disabled = on;
+  els.stop.style.display = on ? "" : "none";
+}
+
+async function send() {
+  const text = els.input.value.trim();
+  if (!text || busy) return;
+  els.input.value = "";
+  history.push({ role: "user", content: text });
+  addMessage("user", text);
+  setBusy(true);
+  const bubble = addMessage("assistant", "Kedi is thinking… 🐾");
+  bubble.classList.add("thinking");
+  let reply = "";
+  try {
+    await ensureCat();
+    abort = new AbortController();
+    const maxTokens = +$("maxTok").value;
+    await wllama.createChatCompletion({
+      messages: fitHistory(maxTokens), stream: true, max_tokens: maxTokens, abortSignal: abort.signal,
+      temp: +$("temp").value, top_p: +$("topP").value, penalty_repeat: 1.15,
+      onData: (chunk) => {
+        const piece = chunk.choices?.[0]?.delta?.content;
+        if (!piece) return;
+        if (!reply) bubble.classList.remove("thinking");
+        reply += piece;
+        bubble.innerHTML = render(reply);
+        els.chat.scrollTop = els.chat.scrollHeight;
+      },
+    });
+  } catch (e) {
+    if (e?.name !== "AbortError" && !abort?.signal.aborted) {
+      console.error(e);
+      if (!reply) bubble.innerHTML = render(`😿 Something went wrong: ${e?.message || e}`);
+    }
+  } finally {
+    abort = null;
+    bubble.classList.remove("thinking");
+    if (!reply.trim()) {
+      if (bubble.textContent.startsWith("Kedi is thinking")) bubble.innerHTML = "<i>(Kedi stares at you, blinks slowly, and says nothing.)</i>";
+    } else {
+      history.push({ role: "assistant", content: reply });
+    }
+    setBusy(false);
+    els.input.focus();
+  }
+}
+
+els.send.onclick = send;
+els.stop.onclick = () => abort?.abort();
+els.clear.onclick = () => {
+  if (busy) return;
+  history = [];
+  els.chat.querySelectorAll(".msg").forEach((m) => m.remove());
+  els.empty.style.display = "";
+};
+els.input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+els.cat.onchange = () => { showCard(); if (!busy) ensureCat().catch((e) => console.error(e)); };
+</script>
+</body>
+</html>
